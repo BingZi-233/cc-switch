@@ -90,6 +90,7 @@ import { discardUnsavedChanges, hasUnsavedChanges } from "@/lib/unsavedChanges";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { AppsPage } from "@/components/apps/AppsPage";
+import { PluginsPage } from "@/components/plugins/PluginsPage";
 import {
   checkToolUpdatesInBackground,
   useToolUpdatesAvailable,
@@ -1709,6 +1710,8 @@ function App() {
         );
       case "apps":
         return <AppsPage />;
+      case "plugins":
+        return <PluginsPage />;
       default:
         return null;
     }

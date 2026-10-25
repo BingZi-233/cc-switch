@@ -583,6 +583,8 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 **技术栈**：Tauri 2 · Rust · React 18 · TypeScript · SQLite
 
+第三方开发者可通过[页面插件 API](docs/plugins.md)添加自定义界面，支持本地安装、启停、多页面和独立存储。
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)

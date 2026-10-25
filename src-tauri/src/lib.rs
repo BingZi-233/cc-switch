@@ -48,6 +48,7 @@ mod store;
 
 mod tray;
 mod tray_panel;
+mod ui_plugins;
 mod usage_events;
 mod usage_script;
 
@@ -509,6 +510,9 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_process::init())
+        .register_uri_scheme_protocol("cc-plugin", |_context, request| {
+            ui_plugins::protocol_response(&request)
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -1515,6 +1519,15 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            ui_plugins::list_ui_plugins,
+            ui_plugins::install_ui_plugin,
+            ui_plugins::set_ui_plugin_enabled,
+            ui_plugins::set_ui_plugin_permissions,
+            ui_plugins::read_api::get_ui_plugin_providers,
+            ui_plugins::read_api::get_ui_plugin_usage,
+            ui_plugins::uninstall_ui_plugin,
+            ui_plugins::get_ui_plugin_storage,
+            ui_plugins::set_ui_plugin_storage,
             commands::get_providers,
             commands::get_current_provider,
             commands::add_provider,

@@ -582,6 +582,8 @@ For development setup, pre-submit checks, and architecture notes, see [CONTRIBUT
 
 **Tech stack**: Tauri 2 · Rust · React 18 · TypeScript · SQLite
 
+Third-party developers can add custom pages through the [UI plugin API](docs/plugins.md), with local installation, enable/disable controls, multiple pages, and isolated storage.
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=farion1231/cc-switch&type=Date)](https://www.star-history.com/#farion1231/cc-switch&Date)
