@@ -5030,6 +5030,15 @@
     }
   },
   "plugins": {
+    "runtime_starting": "Opening plugin window…",
+    "runtime_running": "Plugin is open in a separate window",
+    "runtime_closed": "Plugin window closed",
+    "runtime_unresponsive": "The plugin stopped responding and was terminated",
+    "runtime_failed": "The plugin failed to start or exited unexpectedly",
+    "runtimeHint": "Closing this page stops the plugin. You can reopen it without restarting CC Switch.",
+    "showWindow": "Show window",
+    "stopRuntime": "Stop plugin",
+    "reopen": "Reopen plugin",
     "permissions": "Permissions",
     "permissionsNamed": "Permissions for {{name}}",
     "permissionsTitle": "Permissions for {{name}}",

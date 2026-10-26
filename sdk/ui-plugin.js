@@ -17,6 +17,13 @@
   addEventListener("message", (event) => {
     if (event.source !== parent || event.data?.channel !== channel) return;
     const response = event.data;
+    if (response.event === "healthCheck") {
+      parent.postMessage(
+        { channel, event: "healthReply", challenge: response.challenge },
+        "*",
+      );
+      return;
+    }
     if (response.event === "contextChanged") {
       context = response.value;
       dispatchEvent(

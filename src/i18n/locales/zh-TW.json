@@ -5031,6 +5031,15 @@
     }
   },
   "plugins": {
+    "runtime_starting": "正在開啟外掛視窗…",
+    "runtime_running": "外掛已在獨立視窗開啟",
+    "runtime_closed": "外掛視窗已關閉",
+    "runtime_unresponsive": "外掛沒有回應，已終止執行",
+    "runtime_failed": "外掛啟動失敗或意外結束",
+    "runtimeHint": "離開此頁面會停止外掛。可重新開啟外掛，無需重新啟動 CC Switch。",
+    "showWindow": "顯示視窗",
+    "stopRuntime": "停止外掛",
+    "reopen": "重新開啟外掛",
     "permissions": "權限",
     "permissionsNamed": "{{name}} 的權限",
     "permissionsTitle": "{{name}} 的權限",

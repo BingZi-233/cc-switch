@@ -19,6 +19,7 @@ const MAX_STORAGE: usize = 64 * 1024;
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) mod read_api;
+pub(crate) mod runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PluginPermission {
@@ -413,7 +414,10 @@ pub async fn set_ui_plugin_enabled(
     enabled: bool,
     granted_permissions: Option<Vec<PluginPermission>>,
 ) -> Result<()> {
-    with_registry_async(move |root| set_enabled(root, &id, enabled, granted_permissions)).await
+    let plugin_id = id.clone();
+    with_registry_async(move |root| set_enabled(root, &id, enabled, granted_permissions)).await?;
+    runtime::stop_plugin(&plugin_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -421,15 +425,21 @@ pub async fn set_ui_plugin_permissions(
     id: String,
     granted_permissions: Vec<PluginPermission>,
 ) -> Result<()> {
-    with_registry_async(move |root| set_permissions(root, &id, granted_permissions)).await
+    let plugin_id = id.clone();
+    with_registry_async(move |root| set_permissions(root, &id, granted_permissions)).await?;
+    runtime::stop_plugin(&plugin_id);
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn uninstall_ui_plugin(id: String) -> Result<()> {
+    let plugin_id = id.clone();
     with_registry_async(move |root| {
         fs::remove_file(record_path(root, &id)?).map_err(|e| e.to_string())
     })
-    .await
+    .await?;
+    runtime::stop_plugin(&plugin_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -456,27 +466,6 @@ fn page_html(root: &Path, path: &str) -> Result<String> {
         .get(parts[1])
         .cloned()
         .ok_or_else(|| "Unknown plugin page".into())
-}
-
-pub async fn protocol_response(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
-    let result = if request.method() == http::Method::GET {
-        with_registry_async(move |root| page_html(root, request.uri().path())).await
-    } else {
-        Err("Method not allowed".into())
-    };
-    let (status, body) = match result {
-        Ok(html) => (200, format!("<!doctype html><meta charset=\"utf-8\"><script>{}</script>{html}", include_str!("../../sdk/ui-plugin.js"))),
-        Err(_) => (404, "<!doctype html><title>Plugin unavailable</title><p>Plugin page unavailable. Return to Plugins and check its status.</p>".into()),
-    };
-    http::Response::builder()
-        .status(status)
-        .header("Content-Type", "text/html; charset=utf-8")
-        .header("Content-Security-Policy", PAGE_CSP)
-        .header("X-Content-Type-Options", "nosniff")
-        .header("Referrer-Policy", "no-referrer")
-        .header("Cache-Control", "no-store")
-        .body(body.into_bytes())
-        .expect("static response headers")
 }
 
 #[cfg(test)]

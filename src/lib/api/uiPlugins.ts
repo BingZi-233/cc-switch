@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 
 export type PluginPermission = "providers.read" | "usage.read";
 
@@ -30,6 +30,15 @@ export interface PluginList {
 }
 
 export const uiPluginsKey = ["ui-plugins"] as const;
+export interface PluginAppearance {
+  language: string;
+  theme: "light" | "dark";
+}
+export interface PluginRuntimeStatus {
+  sessionId: string;
+  state: "starting" | "running" | "closed" | "unresponsive" | "failed";
+  pid: number | null;
+}
 export const uiPluginsApi = {
   list: () => invoke<PluginList>("list_ui_plugins"),
   install: (directory: string) =>
@@ -50,6 +59,16 @@ export const uiPluginsApi = {
   getStorage: (id: string) => invoke<unknown>("get_ui_plugin_storage", { id }),
   setStorage: (id: string, value: unknown) =>
     invoke<void>("set_ui_plugin_storage", { id, value }),
-  pageUrl: (id: string, page: string) =>
-    `${convertFileSrc(id, "cc-plugin")}/${encodeURIComponent(page)}`,
+  startRuntime: (id: string, page: string, appearance: PluginAppearance) =>
+    invoke<PluginRuntimeStatus>("start_ui_plugin_runtime", {
+      id,
+      page,
+      appearance,
+    }),
+  getRuntime: (sessionId: string) =>
+    invoke<PluginRuntimeStatus>("get_ui_plugin_runtime", { sessionId }),
+  stopRuntime: (sessionId: string) =>
+    invoke<void>("stop_ui_plugin_runtime", { sessionId }),
+  updateRuntime: (sessionId: string, appearance?: PluginAppearance) =>
+    invoke<void>("update_ui_plugin_runtime", { sessionId, appearance }),
 };

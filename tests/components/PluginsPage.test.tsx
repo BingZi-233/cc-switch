@@ -8,7 +8,7 @@ import {
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PluginsPage } from "@/components/plugins/PluginsPage";
-import { PluginFrame, PLUGIN_CHANNEL } from "@/components/plugins/PluginFrame";
+import { PluginRuntime } from "@/components/plugins/PluginRuntime";
 import type { InstalledPlugin, PluginList } from "@/lib/api/uiPlugins";
 import { parseView } from "@/lib/navigation";
 
@@ -17,8 +17,10 @@ const mocks = vi.hoisted(() => ({
   install: vi.fn(),
   setEnabled: vi.fn(),
   setPermissions: vi.fn(),
-  getProviders: vi.fn(),
-  getUsage: vi.fn(),
+  startRuntime: vi.fn(),
+  getRuntime: vi.fn(),
+  stopRuntime: vi.fn(),
+  updateRuntime: vi.fn(),
   uninstall: vi.fn(),
   getStorage: vi.fn(),
   setStorage: vi.fn(),
@@ -28,8 +30,6 @@ vi.mock("@/lib/api/uiPlugins", () => ({
   uiPluginsKey: ["ui-plugins"],
   uiPluginsApi: {
     ...mocks,
-    pageUrl: (id: string, page: string) =>
-      `http://cc-plugin.localhost/${id}/${page}`,
   },
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.open }));
@@ -82,8 +82,18 @@ beforeEach(() => {
   });
   mocks.getStorage.mockResolvedValue({ note: "saved" });
   mocks.setStorage.mockResolvedValue(undefined);
-  mocks.getProviders.mockResolvedValue({ items: [], total: 0 });
-  mocks.getUsage.mockRejectedValue("PLUGIN_PERMISSION_DENIED");
+  mocks.startRuntime.mockImplementation(async () => ({
+    sessionId: `session-${mocks.startRuntime.mock.calls.length}`,
+    state: "starting",
+    pid: 123,
+  }));
+  mocks.getRuntime.mockImplementation(async (sessionId) => ({
+    sessionId,
+    state: "running",
+    pid: 123,
+  }));
+  mocks.stopRuntime.mockResolvedValue(undefined);
+  mocks.updateRuntime.mockResolvedValue(undefined);
 });
 
 describe("plugin management", () => {
@@ -117,7 +127,7 @@ describe("plugin management", () => {
     );
     await waitFor(() => expect(screen.getByText("plugins.open")).toBeEnabled());
     fireEvent.click(screen.getByText("plugins.open"));
-    const original = screen.getByTitle("Test notes — Notes");
+    await waitFor(() => expect(mocks.startRuntime).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByLabelText("plugins.permissionsNamed"));
     fireEvent.click(
       screen.getByRole("checkbox", { name: /plugins.providersRead / }),
@@ -126,9 +136,7 @@ describe("plugin management", () => {
     await waitFor(() =>
       expect(mocks.setPermissions).toHaveBeenCalledWith("test.notes", []),
     );
-    await waitFor(() =>
-      expect(screen.getByTitle("Test notes — Notes")).not.toBe(original),
-    );
+    await waitFor(() => expect(mocks.startRuntime).toHaveBeenCalledTimes(2));
   });
   it("installs disabled, confirms activation, opens both pages, disables and uninstalls", async () => {
     mount();
@@ -141,12 +149,21 @@ describe("plugin management", () => {
     fireEvent.click(screen.getAllByText("plugins.enable").at(-1)!);
     await waitFor(() => expect(screen.getByText("plugins.open")).toBeEnabled());
     fireEvent.click(screen.getByText("plugins.open"));
-    const frame = screen.getByTitle("Test notes — Notes");
-    expect(frame).toHaveAttribute("sandbox", "allow-scripts");
+    await waitFor(() =>
+      expect(mocks.startRuntime).toHaveBeenCalledWith(
+        "test.notes",
+        "notes",
+        expect.any(Object),
+      ),
+    );
+    expect(document.querySelector("iframe")).toBeNull();
     fireEvent.click(screen.getByRole("tab", { name: "About" }));
-    expect(screen.getByTitle("Test notes — About")).toHaveAttribute(
-      "src",
-      "http://cc-plugin.localhost/test.notes/about",
+    await waitFor(() =>
+      expect(mocks.startRuntime).toHaveBeenCalledWith(
+        "test.notes",
+        "about",
+        expect.any(Object),
+      ),
     );
     fireEvent.click(screen.getByLabelText("plugins.back"));
     fireEvent.click(screen.getByText("plugins.disable"));
@@ -191,147 +208,64 @@ describe("plugin management", () => {
   });
 });
 
-describe("plugin frame boundary", () => {
-  it("binds business reads to the mounted identity and returns backend denials", async () => {
+describe("isolated plugin runtime", () => {
+  const mountRuntime = () =>
     render(
-      <PluginFrame
+      <PluginRuntime
         plugin={{ ...plugin, enabled: true }}
         page={plugin.manifest.pages[0]}
       />,
     );
-    const target = (
-      screen.getByTitle("Test notes — Notes") as HTMLIFrameElement
-    ).contentWindow!;
-    const post = vi.spyOn(target, "postMessage");
-    const send = (method: string) =>
-      act(() => {
-        window.dispatchEvent(
-          new MessageEvent("message", {
-            source: target,
-            origin: "null",
-            data: {
-              channel: PLUGIN_CHANNEL,
-              requestId: method,
-              method,
-              pluginId: "privileged.plugin",
-              value: { appType: "codex" },
-            },
-          }),
-        );
-      });
-    send("providers.list");
+
+  it("opens only a native runtime and keeps stop/focus controls outside plugin code", async () => {
+    mountRuntime();
+    await screen.findByText("plugins.runtime_running");
+    expect(document.querySelector("iframe")).toBeNull();
+    fireEvent.click(screen.getByText("plugins.showWindow"));
     await waitFor(() =>
-      expect(post).toHaveBeenCalledWith(
-        expect.objectContaining({
-          requestId: "providers.list",
-          value: expect.any(Object),
-        }),
-        "*",
-      ),
+      expect(mocks.updateRuntime).toHaveBeenCalledWith("session-1"),
     );
-    expect(mocks.getProviders).toHaveBeenCalledWith("test.notes", {
-      appType: "codex",
-    });
-    send("usage.getStats");
-    await waitFor(() =>
-      expect(post).toHaveBeenCalledWith(
-        expect.objectContaining({ error: "PLUGIN_PERMISSION_DENIED" }),
-        "*",
-      ),
-    );
-    expect(mocks.getUsage).toHaveBeenCalledWith("test.notes", {
-      appType: "codex",
-    });
-  });
-  it("rejects other windows/origins and unknown methods; scopes writes to the mounted plugin", async () => {
-    const result = render(
-      <PluginFrame
-        plugin={{ ...plugin, enabled: true }}
-        page={plugin.manifest.pages[0]}
-      />,
-    );
-    const frame = screen.getByTitle("Test notes — Notes") as HTMLIFrameElement;
-    const target = frame.contentWindow!;
-    const post = vi.spyOn(target, "postMessage");
-    const send = (data: object, source: Window = target, origin = "null") =>
-      act(() => {
-        window.dispatchEvent(
-          new MessageEvent("message", {
-            source,
-            origin,
-            data: { channel: PLUGIN_CHANNEL, requestId: "1", ...data },
-          }),
-        );
-      });
-    send({ method: "setStorage", value: "bad" }, window);
-    send({ method: "setStorage", value: "bad" }, target, "https://example.com");
-    send({ method: "invoke", command: "get_providers" });
-    expect(mocks.setStorage).not.toHaveBeenCalled();
-    expect(post).toHaveBeenCalledWith(
-      expect.objectContaining({ error: "Unsupported plugin method" }),
-      "*",
-    );
-    send({
-      method: "setStorage",
-      pluginId: "other.plugin",
-      value: { note: "new" },
-    });
-    await waitFor(() =>
-      expect(mocks.setStorage).toHaveBeenCalledWith("test.notes", {
-        note: "new",
-      }),
-    );
-    await waitFor(() =>
-      expect(post).toHaveBeenCalledWith(
-        expect.objectContaining({ value: null }),
-        "*",
-      ),
-    );
-    send({ method: "setStorage", value: "x".repeat(65536) });
-    expect(mocks.setStorage).toHaveBeenCalledTimes(1);
-    result.unmount();
-    send({ method: "setStorage", value: "late" });
-    expect(mocks.setStorage).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByText("plugins.stopRuntime"));
+    await screen.findByText("plugins.runtime_closed");
+    expect(mocks.stopRuntime).toHaveBeenCalledWith("session-1");
   });
 
-  it("bounds in-flight work and suppresses responses after the frame is unmounted", async () => {
-    let resolve!: (value: unknown) => void;
-    mocks.getStorage.mockReturnValue(
-      new Promise((res) => {
-        resolve = res;
-      }),
-    );
-    const result = render(
-      <PluginFrame
-        plugin={{ ...plugin, enabled: true }}
-        page={plugin.manifest.pages[0]}
-      />,
-    );
-    const target = (
-      screen.getByTitle("Test notes — Notes") as HTMLIFrameElement
-    ).contentWindow!;
-    const post = vi.spyOn(target, "postMessage");
-    act(() => {
-      for (const requestId of ["a", "b"])
-        window.dispatchEvent(
-          new MessageEvent("message", {
-            source: target,
-            origin: "null",
-            data: { channel: PLUGIN_CHANNEL, requestId, method: "getStorage" },
-          }),
-        );
+  it("restarts an unresponsive runtime with a new session and cleans up the old session", async () => {
+    mocks.getRuntime.mockResolvedValueOnce({
+      sessionId: "session-1",
+      state: "unresponsive",
+      pid: 123,
     });
-    expect(mocks.getStorage).toHaveBeenCalledTimes(1);
-    expect(post).toHaveBeenCalledWith(
-      expect.objectContaining({
-        requestId: "b",
-        error: expect.stringContaining("busy"),
+    mountRuntime();
+    await screen.findByText("plugins.runtime_unresponsive");
+    fireEvent.click(screen.getByText("plugins.reopen"));
+    await screen.findByText("plugins.runtime_running");
+    expect(mocks.startRuntime).toHaveBeenCalledTimes(2);
+    expect(mocks.stopRuntime).toHaveBeenCalledWith("session-1");
+  });
+
+  it("terminates a late startup result after leaving the plugin page", async () => {
+    let finish!: (value: unknown) => void;
+    mocks.startRuntime.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
       }),
-      "*",
     );
-    post.mockClear();
-    result.unmount();
-    await act(async () => resolve({ secret: "stale" }));
-    expect(post).not.toHaveBeenCalled();
+    const view = mountRuntime();
+    view.unmount();
+    await act(async () =>
+      finish({ sessionId: "late-session", state: "starting", pid: 123 }),
+    );
+    expect(mocks.stopRuntime).toHaveBeenCalledWith("late-session");
+    expect(mocks.getRuntime).not.toHaveBeenCalled();
+  });
+
+  it("shows startup errors and permits retry without remounting the application", async () => {
+    mocks.startRuntime.mockRejectedValueOnce(new Error("Cannot start process"));
+    mountRuntime();
+    await screen.findByText("Cannot start process");
+    fireEvent.click(screen.getByText("plugins.reopen"));
+    await screen.findByText("plugins.runtime_running");
+    expect(mocks.startRuntime).toHaveBeenCalledTimes(2);
   });
 });

@@ -68,6 +68,14 @@ describe("UI plugin SDK", () => {
         detail: expect.objectContaining({ theme: "light" }),
       }),
     );
+    const sent = parent.postMessage.mock.calls.length;
+    reply({ event: "healthCheck", challenge: 7 }, {} as typeof parent);
+    expect(parent.postMessage).toHaveBeenCalledTimes(sent);
+    reply({ event: "healthCheck", challenge: 7 });
+    expect(parent.postMessage).toHaveBeenLastCalledWith(
+      { channel: "cc-switch-plugin/v1", event: "healthReply", challenge: 7 },
+      "*",
+    );
   });
 
   it("exposes only asynchronous host calls and discards late replies after timeout", async () => {

@@ -583,7 +583,7 @@ CC_SWITCH_GDK_BACKEND=wayland ./CC-Switch-*.AppImage
 
 **技术栈**：Tauri 2 · Rust · React 18 · TypeScript · SQLite
 
-第三方开发者可通过[页面插件 API](docs/plugins.md)添加自定义界面，支持本地安装、启停、多页面和独立存储。
+第三方开发者可通过[页面插件 API](docs/plugins.md)添加自定义界面，支持本地安装、启停、多页面和独立存储。插件页面在独立进程和窗口中运行，无响应时可终止并重新打开，无需重启 CC Switch。
 
 ## Star History
 

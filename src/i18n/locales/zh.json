@@ -5030,6 +5030,15 @@
     }
   },
   "plugins": {
+    "runtime_starting": "正在打开插件窗口…",
+    "runtime_running": "插件已在独立窗口打开",
+    "runtime_closed": "插件窗口已关闭",
+    "runtime_unresponsive": "插件无响应，已终止运行",
+    "runtime_failed": "插件启动失败或意外退出",
+    "runtimeHint": "离开此页面会停止插件。可以重新打开插件，无需重启 CC Switch。",
+    "showWindow": "显示窗口",
+    "stopRuntime": "停止插件",
+    "reopen": "重新打开插件",
     "permissions": "权限",
     "permissionsNamed": "{{name}} 的权限",
     "permissionsTitle": "{{name}} 的权限",

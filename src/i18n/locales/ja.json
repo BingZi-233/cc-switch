@@ -5030,6 +5030,15 @@
     }
   },
   "plugins": {
+    "runtime_starting": "プラグインウィンドウを開いています…",
+    "runtime_running": "プラグインは別のウィンドウで実行中です",
+    "runtime_closed": "プラグインウィンドウを閉じました",
+    "runtime_unresponsive": "プラグインが応答しないため、終了しました",
+    "runtime_failed": "プラグインを起動できなかったか、予期せず終了しました",
+    "runtimeHint": "このページを離れるとプラグインは停止します。CC Switch を再起動せずに、プラグインを開き直せます。",
+    "showWindow": "ウィンドウを表示",
+    "stopRuntime": "プラグインを停止",
+    "reopen": "プラグインを開き直す",
     "permissions": "権限",
     "permissionsNamed": "{{name}} の権限",
     "permissionsTitle": "{{name}} の権限",

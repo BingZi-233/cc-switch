@@ -132,24 +132,6 @@ fn symbolic_links_cannot_import_external_content() {
     assert!(install(&temp.path().join("installed"), &source).is_err());
 }
 
-#[tokio::test]
-async fn protocol_errors_are_sandboxed_and_never_reflect_input() {
-    let response = protocol_response(
-        http::Request::builder()
-            .method("POST")
-            .uri("cc-plugin://localhost/a/b")
-            .body(vec![])
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(response.status(), 404);
-    assert_eq!(response.headers()["Content-Security-Policy"], PAGE_CSP);
-    assert!(PAGE_CSP.contains("sandbox allow-scripts"));
-    assert!(!PAGE_CSP.contains("allow-same-origin"));
-    assert!(PAGE_CSP.contains("connect-src 'none'"));
-    assert_eq!(response.headers()["Cache-Control"], "no-store");
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn slow_registry_work_does_not_block_the_callers_executor() {
     let caller = std::thread::current().id();

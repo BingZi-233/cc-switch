@@ -582,7 +582,7 @@ For development setup, pre-submit checks, and architecture notes, see [CONTRIBUT
 
 **Tech stack**: Tauri 2 · Rust · React 18 · TypeScript · SQLite
 
-Third-party developers can add custom pages through the [UI plugin API](docs/plugins.md), with local installation, enable/disable controls, multiple pages, and isolated storage.
+Third-party developers can add custom pages through the [UI plugin API](docs/plugins.md), with local installation, enable/disable controls, multiple pages, and isolated storage. Pages run in separate processes and windows; an unresponsive plugin can be terminated and reopened without restarting CC Switch.
 
 ## Star History
 

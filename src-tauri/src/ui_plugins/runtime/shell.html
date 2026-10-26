@@ -1,0 +1,50 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>html,body{margin:0;height:100%;overflow:hidden;color-scheme:light dark}iframe{width:100%;height:100%;border:0;display:block}</style>
+<iframe id="page" sandbox="allow-scripts" referrerpolicy="no-referrer"
+  allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'"></iframe>
+<script>
+(() => {
+  const channel = "cc-switch-plugin/v1";
+  const frame = document.getElementById("page");
+  const invoke = window.__TAURI_INTERNALS__.invoke;
+  let context = window.__PLUGIN_CONTEXT__;
+  let busy = false;
+  let challenge = 0;
+  let acknowledged = 0;
+  const post = value => frame.contentWindow.postMessage({ channel, ...value }, "*");
+  window.__pluginAppearance = value => {
+    context = { ...context, ...value };
+    document.documentElement.style.colorScheme = context.theme;
+    document.documentElement.lang = context.language;
+    post({ event: "contextChanged", value: context });
+  };
+  window.__pluginPing = () => post({ event: "healthCheck", challenge: ++challenge });
+  addEventListener("message", async event => {
+    if (event.source !== frame.contentWindow || event.origin !== "null") return;
+    const request = event.data;
+    if (!request || request.channel !== channel) return;
+    if (request.event === "healthReply") {
+      if (request.challenge !== challenge || acknowledged === challenge) return;
+      acknowledged = challenge;
+      void invoke("plugin_runtime_heartbeat").catch(() => {});
+      return;
+    }
+    if (typeof request.requestId !== "string" || request.requestId.length > 80 || typeof request.method !== "string") return;
+    if (busy) { post({ requestId: request.requestId, error: "Plugin host is busy; await the previous request" }); return; }
+    busy = true;
+    try {
+      if (!["ready", "getContext", "getStorage", "setStorage", "providers.list", "usage.getStats"].includes(request.method)) throw new Error("Unsupported plugin method");
+      const value = await invoke("plugin_runtime_request", { method: request.method, value: request.value ?? null });
+      if (request.method === "ready" || request.method === "getContext") window.__pluginAppearance(value);
+      post({ requestId: request.requestId, value });
+    } catch (error) {
+      post({ requestId: request.requestId, error: error instanceof Error ? error.message : String(error) });
+    } finally { busy = false; }
+  });
+  window.__pluginAppearance(context);
+  frame.title = document.title = context.pluginId;
+  frame.src = location.href.replace(/\/shell$/, "/page");
+})();
+</script>

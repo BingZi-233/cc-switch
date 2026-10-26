@@ -25,7 +25,7 @@ import { PageTabs } from "@/components/ui/page-tabs";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { toast } from "@/lib/toast";
 import { extractErrorMessage } from "@/utils/errorUtils";
-import { PluginFrame } from "./PluginFrame";
+import { PluginRuntime } from "./PluginRuntime";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
 import { PluginPermissionsDialog } from "./PluginPermissionsDialog";
 
@@ -203,7 +203,7 @@ export function PluginsPage() {
             aria-labelledby={`plugin-tab-${page.id}`}
             className="flex min-h-0 flex-1 flex-col"
           >
-            <PluginFrame
+            <PluginRuntime
               key={`${plugin.manifest.id}/${page.id}/${reload}/${plugin.grantedPermissions?.join(",") ?? ""}`}
               plugin={plugin}
               page={page}

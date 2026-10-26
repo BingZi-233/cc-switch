@@ -396,8 +396,21 @@ fn raise_open_file_limit() {
     }
 }
 
+fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == ui_plugins::runtime::CHILD_FLAG)
+    {
+        if ui_plugins::runtime::child::run().is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
     panic_hook::setup_panic_hook();
 
@@ -452,9 +465,14 @@ pub fn run() {
     }
 
     #[cfg(target_os = "windows")]
-    {
-        let startup_page_handled = AtomicBool::new(false);
-        builder = builder.on_page_load(move |webview, payload| {
+    let startup_page_handled = AtomicBool::new(false);
+    builder = builder.on_page_load(move |webview, payload| {
+        if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
+            // A renderer reload does not run React effect cleanup.
+            ui_plugins::runtime::stop_all();
+        }
+        #[cfg(target_os = "windows")]
+        {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
                 && payload.url().scheme() != "about"
@@ -464,8 +482,8 @@ pub fn run() {
                 let _ = webview.window().show();
                 log::info!("主页面加载完成，主窗口已显示");
             }
-        });
-    }
+        }
+    });
 
     let builder = builder
         // 注册 deep-link 插件（处理 macOS AppleEvent 和其他平台的深链接）
@@ -477,6 +495,9 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    ui_plugins::runtime::stop_all();
+                }
                 log::info!("收到窗口关闭请求: label={}", window.label());
                 // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
                 let in_db_recovery = crate::init_status::get_init_error()
@@ -510,14 +531,6 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_process::init())
-        .register_asynchronous_uri_scheme_protocol(
-            "cc-plugin",
-            |_context, request, responder| {
-                tauri::async_runtime::spawn(async move {
-                    responder.respond(ui_plugins::protocol_response(request).await);
-                });
-            },
-        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -1525,6 +1538,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ui_plugins::list_ui_plugins,
+            ui_plugins::runtime::start_ui_plugin_runtime,
+            ui_plugins::runtime::get_ui_plugin_runtime,
+            ui_plugins::runtime::stop_ui_plugin_runtime,
+            ui_plugins::runtime::update_ui_plugin_runtime,
             ui_plugins::install_ui_plugin,
             ui_plugins::set_ui_plugin_enabled,
             ui_plugins::set_ui_plugin_permissions,
@@ -1942,7 +1959,7 @@ pub fn run() {
         ]);
 
     let app = builder
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {

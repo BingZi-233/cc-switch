@@ -76,7 +76,33 @@ fn read_error(error: impl std::fmt::Display) -> String {
     "PLUGIN_READ_FAILED".into()
 }
 
-fn providers(db: &Database, query: ProviderQuery) -> Result<ProviderList> {
+/// Plugin queries must not hold the application's shared connection mutex.
+/// A private read-only connection also bounds lock waits and SQLite execution.
+pub(super) fn isolated_reader(db: &Database) -> Result<Database> {
+    let path = db
+        .conn
+        .try_lock()
+        .map_err(|_| "PLUGIN_BUSY")?
+        .path()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .ok_or("PLUGIN_READ_FAILED")?;
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(read_error)?;
+    conn.busy_timeout(std::time::Duration::from_millis(100))
+        .map_err(read_error)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    conn.progress_handler(1000, Some(move || std::time::Instant::now() >= deadline));
+    Ok(Database {
+        conn: std::sync::Mutex::new(conn),
+        log_count_cache: std::sync::Mutex::new(None),
+    })
+}
+
+pub(super) fn providers(db: &Database, query: ProviderQuery) -> Result<ProviderList> {
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
     if !(1..=200).contains(&limit) || offset > 100_000 {
@@ -114,7 +140,7 @@ fn providers(db: &Database, query: ProviderQuery) -> Result<ProviderList> {
     })
 }
 
-fn usage(db: &Database, query: UsageQuery) -> Result<UsageStats> {
+pub(super) fn usage(db: &Database, query: UsageQuery) -> Result<UsageStats> {
     let now = chrono::Utc::now().timestamp();
     if query.start_date < 0
         || query.end_date <= query.start_date
@@ -186,7 +212,7 @@ async fn read_authorized<T: Send + 'static>(
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let revision = with_registry(|root| authorize(root, &id, permission))?;
-        let result = query(&db)?;
+        let result = query(&isolated_reader(&db)?)?;
         // Revoking, disabling, or reinstalling also discards responses already in flight.
         with_registry(|root| check_revision(root, &id, permission, &revision))?;
         Ok(result)

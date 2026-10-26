@@ -198,3 +198,37 @@ fn usage_reuses_main_screen_totals_and_filters_without_returning_raw_logs() {
         );
     }
 }
+
+#[test]
+fn isolated_queries_use_a_private_readonly_connection_and_never_wait_for_the_main_mutex() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database {
+        conn: std::sync::Mutex::new(
+            rusqlite::Connection::open(temp.path().join("data.db")).unwrap(),
+        ),
+        log_count_cache: std::sync::Mutex::new(None),
+    };
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("CREATE TABLE example (value INTEGER); INSERT INTO example VALUES (7);")
+        .unwrap();
+    let reader = isolated_reader(&db).unwrap();
+    let _main_guard = db.conn.lock().unwrap();
+    assert_eq!(
+        reader
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM example", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        7
+    );
+    assert!(reader
+        .conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM example", [])
+        .is_err());
+    assert!(matches!(isolated_reader(&db), Err(error) if error == "PLUGIN_BUSY"));
+}
