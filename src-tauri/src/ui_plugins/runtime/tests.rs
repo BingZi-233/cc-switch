@@ -1,5 +1,27 @@
 use super::*;
 
+#[test]
+fn child_command_uses_its_private_directory_and_preserves_windows_system_paths() {
+    let profile = tempfile::tempdir().unwrap();
+    let command = command(profile.path()).unwrap();
+    let command = command.as_std();
+    assert_eq!(command.get_current_dir(), Some(profile.path()));
+    let env: BTreeMap<_, _> = command.get_envs().collect();
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("CC_SWITCH_PLUGIN_PROFILE")),
+        Some(&Some(profile.path().as_os_str()))
+    );
+    #[cfg(windows)]
+    for key in ["SystemDrive", "ProgramData", "ALLUSERSPROFILE"] {
+        let parent_value = std::env::var_os(key).expect("Windows system path is available");
+        assert_eq!(
+            env.get(std::ffi::OsStr::new(key)),
+            Some(&Some(parent_value.as_os_str())),
+            "missing {key}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn pipe_frames_are_bounded_and_round_trip() {
     let (mut writer, mut reader) = tokio::io::duplex(1024);

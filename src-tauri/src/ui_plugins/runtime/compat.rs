@@ -18,6 +18,7 @@ pub(crate) fn entry() -> bool {
     let Some(path) = args.get(2).map(PathBuf::from) else {
         std::process::exit(2);
     };
+    let path = std::path::absolute(path).unwrap_or_else(|_| std::process::exit(2));
     if flag == PARENT_FLAG {
         let result = tauri::async_runtime::block_on(parent_fixture(&path));
         if let Err(error) = result {
@@ -46,6 +47,7 @@ pub(crate) fn entry() -> bool {
 }
 
 fn setup(home: &Path) -> Result<Arc<Database>> {
+    std::env::set_var("CC_SWITCH_COMPAT_SECRET", "must-not-reach-plugin-process");
     std::env::set_var("CC_SWITCH_TEST_HOME", home);
     let db = Arc::new(Database::init().map_err(|e| e.to_string())?);
     {
@@ -76,6 +78,32 @@ fn setup(home: &Path) -> Result<Arc<Database>> {
     };
     write_record(&root, &record)?;
     Ok(db)
+}
+
+pub(super) fn check_child_environment(profile: &Path) -> Result<()> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    if fs::canonicalize(cwd).map_err(|e| e.to_string())?
+        != fs::canonicalize(profile).map_err(|e| e.to_string())?
+    {
+        return Err("Plugin inherited the launcher's working directory".into());
+    }
+    if std::env::var_os("CC_SWITCH_COMPAT_SECRET").is_some() {
+        return Err("Plugin inherited a non-system environment variable".into());
+    }
+    #[cfg(windows)]
+    {
+        let drive = std::env::var("SystemDrive").map_err(|_| "Missing SystemDrive")?;
+        if !Path::new(&format!("{drive}\\")).is_absolute() {
+            return Err("SystemDrive cannot expand to an absolute path".into());
+        }
+        for key in ["ProgramData", "ALLUSERSPROFILE"] {
+            let value = std::env::var_os(key).ok_or_else(|| format!("Missing {key}"))?;
+            if !Path::new(&value).is_absolute() {
+                return Err(format!("{key} is not an absolute system path"));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn launch(db: &Arc<Database>, scenario: &str, hang: bool, denied: bool) -> Result<String> {
@@ -301,11 +329,32 @@ fn passed(report: &mut Value, name: &str) {
 async fn run(report: &mut Value) -> Result<()> {
     let home = tempfile::tempdir().map_err(|e| e.to_string())?;
     let db = setup(home.path())?;
-    let normal = launch(&db, "normal", false, false).await?;
+    let launch_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let original_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    std::env::set_current_dir(launch_dir.path()).map_err(|e| e.to_string())?;
+    let result = run_scenarios(report, &db).await;
+    std::env::set_current_dir(original_dir).map_err(|e| e.to_string())?;
+    let entries = fs::read_dir(launch_dir.path())
+        .map_err(|e| e.to_string())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    report["launchDirectoryEntries"] = json!(entries);
+    report["launchDirectoryClean"] = json!(entries.is_empty());
+    result?;
+    if !entries.is_empty() {
+        return Err(format!("Plugin polluted the launch directory: {entries:?}"));
+    }
+    report["childEnvironmentValidated"] = json!(true);
+    Ok(())
+}
+
+async fn run_scenarios(report: &mut Value, db: &Arc<Database>) -> Result<()> {
+    let normal = launch(db, "normal", false, false).await?;
     let pid = wait_ready(&normal, "normal", false).await?;
     stop(&normal, pid).await?;
     passed(report, "native_webview_sdk_storage_providers_usage");
-    let hung = launch(&db, "hang", true, false).await?;
+    let hung = launch(db, "hang", true, false).await?;
     let pid = wait_ready(&hung, "hang", false).await?;
     let renderers = descendants(pid)?;
     report["watchdogDescendants"] = json!(renderers);
@@ -315,7 +364,7 @@ async fn run(report: &mut Value) -> Result<()> {
     }
     stop(&hung, pid).await?;
     passed(report, "infinite_loop_watchdog_host_remains_responsive");
-    let restart = launch(&db, "restart", false, false).await?;
+    let restart = launch(db, "restart", false, false).await?;
     let pid = wait_ready(&restart, "restart", false).await?;
     let renderers = descendants(pid)?;
     crash(pid)?;
@@ -328,7 +377,7 @@ async fn run(report: &mut Value) -> Result<()> {
         report,
         "restart_preserves_storage_and_child_crash_is_contained",
     );
-    let limited = launch(&db, "limited", false, true).await?;
+    let limited = launch(db, "limited", false, true).await?;
     let pid = wait_ready(&limited, "limited", true).await?;
     super::super::set_ui_plugin_enabled(ID.into(), false, None).await?;
     wait_state(&limited, "closed", pid).await?;

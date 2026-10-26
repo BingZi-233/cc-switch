@@ -81,6 +81,8 @@ jobs:
           report = json.load(open('plugin-compat-report.json', encoding='utf-8'))
           print(json.dumps(report, indent=2))
           assert report['success'] and len(report['passed']) == 5, report
+          assert report['launchDirectoryClean'] and report['launchDirectoryEntries'] == [], report
+          assert report['childEnvironmentValidated'], report
           PY
       - name: Upload native evidence
         if: always()

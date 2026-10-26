@@ -117,6 +117,8 @@ pub fn run() -> Result<()> {
     let profile = PathBuf::from(
         std::env::var_os("CC_SWITCH_PLUGIN_PROFILE").ok_or("Missing runtime profile")?,
     );
+    #[cfg(feature = "test-hooks")]
+    super::compat::check_child_environment(&profile)?;
     let mut context = crate::app_context();
     let config = context.config_mut();
     config.identifier = "com.ccswitch.plugin-runtime".into();

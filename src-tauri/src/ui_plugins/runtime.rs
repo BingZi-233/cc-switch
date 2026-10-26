@@ -149,7 +149,7 @@ async fn write_frame(
     .map_err(|e| e.to_string())
 }
 
-fn command() -> Result<Command> {
+fn command(profile: &Path) -> Result<Command> {
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut command = Command::new(executable);
     command
@@ -158,7 +158,10 @@ fn command() -> Result<Command> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
-        .env_clear();
+        .env_clear()
+        // Native libraries may write relative caches. Never inherit the launcher's cwd.
+        .current_dir(profile)
+        .env("CC_SWITCH_PLUGIN_PROFILE", profile);
     #[cfg(feature = "test-hooks")]
     if let Some(directory) = std::env::var_os("CC_SWITCH_PLUGIN_DIAGNOSTICS") {
         let path = PathBuf::from(directory).join(format!("child-{}.log", uuid::Uuid::new_v4()));
@@ -179,6 +182,18 @@ fn command() -> Result<Command> {
         "DBUS_SESSION_BUS_ADDRESS",
         "XAUTHORITY",
         "SystemRoot",
+        // Windows known folders expand these variables (e.g. %SystemDrive%\ProgramData).
+        // Missing values leave literal %...% paths and create caches in the cwd.
+        "SystemDrive",
+        "ProgramData",
+        "ALLUSERSPROFILE",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramW6432",
+        "CommonProgramFiles",
+        "CommonProgramFiles(x86)",
+        "CommonProgramW6432",
+        "ComSpec",
         "WINDIR",
         "USERPROFILE",
         "LOCALAPPDATA",
@@ -349,8 +364,7 @@ async fn supervise(
         return Ok(());
     }
     let profile = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let mut child = command()?
-        .env("CC_SWITCH_PLUGIN_PROFILE", profile.path())
+    let mut child = command(profile.path())?
         .spawn()
         .map_err(|e| e.to_string())?;
     let tree = ProcessTree::attach(&child)?;
