@@ -132,19 +132,44 @@ fn symbolic_links_cannot_import_external_content() {
     assert!(install(&temp.path().join("installed"), &source).is_err());
 }
 
-#[test]
-fn protocol_errors_are_sandboxed_and_never_reflect_input() {
+#[tokio::test]
+async fn protocol_errors_are_sandboxed_and_never_reflect_input() {
     let response = protocol_response(
-        &http::Request::builder()
+        http::Request::builder()
             .method("POST")
             .uri("cc-plugin://localhost/a/b")
             .body(vec![])
             .unwrap(),
-    );
+    )
+    .await;
     assert_eq!(response.status(), 404);
     assert_eq!(response.headers()["Content-Security-Policy"], PAGE_CSP);
     assert!(PAGE_CSP.contains("sandbox allow-scripts"));
     assert!(!PAGE_CSP.contains("allow-same-origin"));
     assert!(PAGE_CSP.contains("connect-src 'none'"));
     assert_eq!(response.headers()["Cache-Control"], "no-store");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn slow_registry_work_does_not_block_the_callers_executor() {
+    let caller = std::thread::current().id();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let operation = with_registry_async(move |_| {
+        assert_ne!(std::thread::current().id(), caller);
+        started_tx.send(()).unwrap();
+        // Model slow disk I/O while holding the registry lock. A timeout bounds
+        // the test if the caller stops making progress.
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        Ok(42)
+    });
+    let heartbeat = async {
+        started_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        release_tx.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(operation, heartbeat);
+    assert_eq!(result.unwrap(), 42);
 }

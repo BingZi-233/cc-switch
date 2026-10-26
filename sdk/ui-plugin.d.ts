@@ -70,6 +70,7 @@ export type JsonValue =
 
 declare global {
   interface Window {
+    /** All host calls are asynchronous. Await each request; no synchronous API is exposed. */
     CCSwitch: {
       readonly ready: Promise<PluginContext>;
       getContext(): Promise<PluginContext>;

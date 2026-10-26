@@ -510,9 +510,14 @@ pub fn run() {
             }
         })
         .plugin(tauri_plugin_process::init())
-        .register_uri_scheme_protocol("cc-plugin", |_context, request| {
-            ui_plugins::protocol_response(&request)
-        })
+        .register_asynchronous_uri_scheme_protocol(
+            "cc-plugin",
+            |_context, request, responder| {
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(ui_plugins::protocol_response(request).await);
+                });
+            },
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())

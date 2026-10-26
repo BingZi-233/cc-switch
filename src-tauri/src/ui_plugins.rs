@@ -384,46 +384,62 @@ fn with_registry<T>(f: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
     f(&crate::config::get_app_config_dir().join("ui-plugins"))
 }
 
-#[tauri::command]
-pub fn list_ui_plugins() -> Result<PluginList> {
-    with_registry(list)
+// Even lock acquisition and config-path lookup can block. Keep the entire registry
+// operation off both the UI thread and async executor threads.
+async fn with_registry_async<T: Send + 'static>(
+    f: impl FnOnce(&Path) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tauri::async_runtime::spawn_blocking(move || with_registry(f))
+        .await
+        .map_err(|error| {
+            log::warn!("Plugin registry task failed: {error}");
+            "PLUGIN_TASK_FAILED".to_string()
+        })?
 }
 
 #[tauri::command]
-pub fn install_ui_plugin(directory: String) -> Result<InstalledPlugin> {
-    with_registry(|root| install(root, Path::new(&directory)))
+pub async fn list_ui_plugins() -> Result<PluginList> {
+    with_registry_async(list).await
 }
 
 #[tauri::command]
-pub fn set_ui_plugin_enabled(
+pub async fn install_ui_plugin(directory: String) -> Result<InstalledPlugin> {
+    with_registry_async(move |root| install(root, Path::new(&directory))).await
+}
+
+#[tauri::command]
+pub async fn set_ui_plugin_enabled(
     id: String,
     enabled: bool,
     granted_permissions: Option<Vec<PluginPermission>>,
 ) -> Result<()> {
-    with_registry(|root| set_enabled(root, &id, enabled, granted_permissions))
+    with_registry_async(move |root| set_enabled(root, &id, enabled, granted_permissions)).await
 }
 
 #[tauri::command]
-pub fn set_ui_plugin_permissions(
+pub async fn set_ui_plugin_permissions(
     id: String,
     granted_permissions: Vec<PluginPermission>,
 ) -> Result<()> {
-    with_registry(|root| set_permissions(root, &id, granted_permissions))
+    with_registry_async(move |root| set_permissions(root, &id, granted_permissions)).await
 }
 
 #[tauri::command]
-pub fn uninstall_ui_plugin(id: String) -> Result<()> {
-    with_registry(|root| fs::remove_file(record_path(root, &id)?).map_err(|e| e.to_string()))
+pub async fn uninstall_ui_plugin(id: String) -> Result<()> {
+    with_registry_async(move |root| {
+        fs::remove_file(record_path(root, &id)?).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_ui_plugin_storage(id: String) -> Result<Value> {
-    with_registry(|root| storage(root, &id, None))
+pub async fn get_ui_plugin_storage(id: String) -> Result<Value> {
+    with_registry_async(move |root| storage(root, &id, None)).await
 }
 
 #[tauri::command]
-pub fn set_ui_plugin_storage(id: String, value: Value) -> Result<()> {
-    with_registry(|root| storage(root, &id, Some(value)).map(|_| ()))
+pub async fn set_ui_plugin_storage(id: String, value: Value) -> Result<()> {
+    with_registry_async(move |root| storage(root, &id, Some(value)).map(|_| ())).await
 }
 
 fn page_html(root: &Path, path: &str) -> Result<String> {
@@ -442,9 +458,9 @@ fn page_html(root: &Path, path: &str) -> Result<String> {
         .ok_or_else(|| "Unknown plugin page".into())
 }
 
-pub fn protocol_response(request: &http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
+pub async fn protocol_response(request: http::Request<Vec<u8>>) -> http::Response<Vec<u8>> {
     let result = if request.method() == http::Method::GET {
-        with_registry(|root| page_html(root, request.uri().path()))
+        with_registry_async(move |root| page_html(root, request.uri().path())).await
     } else {
         Err("Method not allowed".into())
     };
