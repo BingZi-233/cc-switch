@@ -135,4 +135,13 @@ pnpm exec vitest run tests/components/PluginsPage.test.tsx tests/lib/uiPluginSdk
 cargo test --manifest-path src-tauri/Cargo.toml --lib ui_plugins::
 ```
 
+跨平台原生验收见 [Plugin Native Compatibility 工作流](../.github/workflows/plugin-compat.yml)：在 Windows WebView2 和 Linux WebKitGTK/Xvfb 中启动真实插件窗口，验证 SDK 与只读数据接口、死循环看门狗、崩溃恢复、撤权停用及主进程退出，并检查渲染子进程没有残留。每次运行上传 JSON 报告和子进程诊断日志。
+
+验收入口只在显式启用 `test-hooks` 时编译，不进入正常发行构建。它使用临时配置和数据库，不读取用户的供应商数据。Windows 验收构建使用与发行版相同的无控制台子系统，覆盖私有管道与 Job Object 的实际行为。Linux 可在安装原生 WebView 与 Xvfb 依赖后运行：
+
+```sh
+cargo build --locked --manifest-path src-tauri/Cargo.toml --features test-hooks
+dbus-run-session -- xvfb-run -a src-tauri/target/debug/cc-switch --plugin-compat-check "$PWD/plugin-compat-report.json"
+```
+
 实现参考：[Tauri capabilities](https://v2.tauri.app/security/capabilities/)、[MDN iframe sandbox](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/iframe)、[CSP sandbox](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/sandbox)。这些机制仍需在各发布目标的原生 WebView 上验收。

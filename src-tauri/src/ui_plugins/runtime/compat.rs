@@ -180,6 +180,15 @@ async fn wait_exit(pid: u32) -> Result<()> {
 }
 
 fn process_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        if stat
+            .rsplit_once(')')
+            .is_some_and(|(_, fields)| fields.trim_start().starts_with('Z'))
+        {
+            return false;
+        }
+    }
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, 0) == 0
@@ -196,6 +205,70 @@ fn process_alive(pid: u32) -> bool {
         CloseHandle(handle);
         alive
     }
+}
+
+fn descendants(root: u32) -> Result<Vec<u32>> {
+    #[cfg(any(target_os = "linux", windows))]
+    let mut parents: Vec<(u32, u32)> = Vec::new();
+    // macOS WebKit XPC services are owned by launchd, not this process tree.
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let parents: Vec<(u32, u32)> = Vec::new();
+    #[cfg(target_os = "linux")]
+    for entry in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Ok(stat) = fs::read_to_string(entry.path().join("stat")) {
+            if let Some(parent) = stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|parent| parent.parse().ok())
+            {
+                parents.push((pid, parent));
+            }
+        }
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+            System::Diagnostics::ToolHelp::*,
+        };
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of_val(&entry) as u32;
+        let mut present = Process32FirstW(snapshot, &mut entry);
+        while present != 0 {
+            parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            present = Process32NextW(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+    }
+    let mut found = std::collections::BTreeSet::from([root]);
+    loop {
+        let before = found.len();
+        for (pid, parent) in &parents {
+            if found.contains(parent) {
+                found.insert(*pid);
+            }
+        }
+        if found.len() == before {
+            break;
+        }
+    }
+    found.remove(&root);
+    #[cfg(any(target_os = "linux", windows))]
+    if found.is_empty() {
+        return Err("No native WebView descendant was discovered".into());
+    }
+    Ok(found.into_iter().collect())
 }
 
 fn crash(pid: u32) -> Result<()> {
@@ -234,13 +307,22 @@ async fn run(report: &mut Value) -> Result<()> {
     passed(report, "native_webview_sdk_storage_providers_usage");
     let hung = launch(&db, "hang", true, false).await?;
     let pid = wait_ready(&hung, "hang", false).await?;
+    let renderers = descendants(pid)?;
+    report["watchdogDescendants"] = json!(renderers);
     wait_state(&hung, "unresponsive", pid).await?;
+    for child in renderers {
+        wait_exit(child).await?;
+    }
     stop(&hung, pid).await?;
     passed(report, "infinite_loop_watchdog_host_remains_responsive");
     let restart = launch(&db, "restart", false, false).await?;
     let pid = wait_ready(&restart, "restart", false).await?;
+    let renderers = descendants(pid)?;
     crash(pid)?;
     wait_state(&restart, "failed", pid).await?;
+    for child in renderers {
+        wait_exit(child).await?;
+    }
     stop(&restart, pid).await?;
     passed(
         report,
@@ -252,7 +334,7 @@ async fn run(report: &mut Value) -> Result<()> {
     wait_state(&limited, "closed", pid).await?;
     stop(&limited, pid).await?;
     passed(report, "permission_denial_and_disable_terminate_runtime");
-    parent_crash().await?;
+    parent_crash(report).await?;
     passed(report, "parent_crash_terminates_child");
     Ok(())
 }
@@ -261,13 +343,16 @@ async fn parent_fixture(root: &Path) -> Result<()> {
     let db = setup(root)?;
     let id = launch(&db, "orphan", false, false).await?;
     let pid = wait_ready(&id, "orphan", false).await?;
-    fs::write(root.join("ready.json"), json!({"pid":pid}).to_string())
-        .map_err(|e| e.to_string())?;
+    fs::write(
+        root.join("ready.json"),
+        json!({"pid":pid,"descendants":descendants(pid)?}).to_string(),
+    )
+    .map_err(|e| e.to_string())?;
     std::future::pending::<()>().await;
     Ok(())
 }
 
-async fn parent_crash() -> Result<()> {
+async fn parent_crash(report: &mut Value) -> Result<()> {
     let root = tempfile::tempdir().map_err(|e| e.to_string())?;
     let mut parent = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
         .arg(PARENT_FLAG)
@@ -279,10 +364,10 @@ async fn parent_crash() -> Result<()> {
         .spawn()
         .map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(40);
-    let pid = loop {
+    let ready = loop {
         if let Ok(bytes) = fs::read(root.path().join("ready.json")) {
             let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-            break value["pid"].as_u64().ok_or("Invalid child PID")? as u32;
+            break value;
         }
         if parent.try_wait().map_err(|e| e.to_string())?.is_some() || Instant::now() >= deadline {
             return Err(format!(
@@ -292,6 +377,15 @@ async fn parent_crash() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
+    let pid = ready["pid"].as_u64().ok_or("Invalid child PID")? as u32;
+    report["parentCrashDescendants"] = ready["descendants"].clone();
     parent.kill().await.map_err(|e| e.to_string())?;
-    wait_exit(pid).await
+    wait_exit(pid).await?;
+    for child in ready["descendants"]
+        .as_array()
+        .ok_or("Missing descendants")?
+    {
+        wait_exit(child.as_u64().ok_or("Invalid descendant PID")? as u32).await?;
+    }
+    Ok(())
 }
