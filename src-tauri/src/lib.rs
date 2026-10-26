@@ -402,11 +402,16 @@ fn app_context() -> tauri::Context<tauri::Wry> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(feature = "test-hooks")]
+    if ui_plugins::runtime::compat::entry() {
+        return;
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == ui_plugins::runtime::CHILD_FLAG)
     {
-        if ui_plugins::runtime::child::run().is_err() {
+        if let Err(error) = ui_plugins::runtime::child::run() {
+            eprintln!("Plugin runtime failed: {error}");
             std::process::exit(1);
         }
         return;

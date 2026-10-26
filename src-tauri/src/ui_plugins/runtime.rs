@@ -11,6 +11,8 @@ use tokio::{
 };
 
 pub(crate) mod child;
+#[cfg(feature = "test-hooks")]
+pub(crate) mod compat;
 mod process;
 use process::ProcessTree;
 #[cfg(test)]
@@ -157,6 +159,11 @@ fn command() -> Result<Command> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .env_clear();
+    #[cfg(feature = "test-hooks")]
+    if let Some(directory) = std::env::var_os("CC_SWITCH_PLUGIN_DIAGNOSTICS") {
+        let path = PathBuf::from(directory).join(format!("child-{}.log", uuid::Uuid::new_v4()));
+        command.stderr(fs::File::create(path).map_err(|e| e.to_string())?);
+    }
     // Pass OS display/runtime essentials, not provider tokens or developer secrets.
     for key in [
         "PATH",
@@ -217,6 +224,15 @@ pub async fn start_ui_plugin_runtime(
     page: String,
     appearance: Appearance,
 ) -> Result<RuntimeStatus> {
+    start(state.db.clone(), id, page, appearance).await
+}
+
+async fn start(
+    db: Arc<Database>,
+    id: String,
+    page: String,
+    appearance: Appearance,
+) -> Result<RuntimeStatus> {
     appearance.validate()?;
     let plugin_id = id.clone();
     let (boot, revision) = with_registry_async(move |root| {
@@ -253,7 +269,6 @@ pub async fn start_ui_plugin_runtime(
             },
         );
     }
-    let db = state.db.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = supervise(
             boot,

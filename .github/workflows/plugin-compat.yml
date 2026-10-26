@@ -1,0 +1,93 @@
+name: Plugin Native Compatibility
+
+on:
+  push:
+    branches: [main, codex/plugin-system]
+    paths:
+      - 'src-tauri/**'
+      - 'sdk/**'
+      - '.github/workflows/plugin-compat.yml'
+  pull_request:
+    paths:
+      - 'src-tauri/**'
+      - 'sdk/**'
+      - '.github/workflows/plugin-compat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: |
+          channel=$(sed -nE 's/^channel *= *"([^"]+)".*/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
+      - name: Install Linux native WebView and display
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev xvfb xauth dbus-x11
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: src-tauri -> target
+          shared-key: backend
+          save-if: false
+      - name: Prepare frontend placeholder
+        shell: bash
+        run: mkdir -p dist
+      - name: Check test hooks
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --features test-hooks -- -D warnings
+      - name: Build native acceptance binary
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --features test-hooks
+      - name: Run native WebKitGTK acceptance
+        if: runner.os == 'Linux'
+        env:
+          GDK_BACKEND: x11
+        run: timeout 120s dbus-run-session -- xvfb-run -a src-tauri/target/debug/cc-switch --plugin-compat-check "$PWD/plugin-compat-report.json"
+      - name: Run native WebView2 acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:GITHUB_WORKSPACE 'plugin-compat-report.json'
+          $process = Start-Process -FilePath 'src-tauri/target/debug/cc-switch.exe' -ArgumentList @('--plugin-compat-check', ('"' + $report + '"')) -PassThru
+          if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Native plugin acceptance timed out' }
+          if ($process.ExitCode -ne 0) { throw "Native plugin acceptance exited with $($process.ExitCode)" }
+      - name: Verify native evidence
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('plugin-compat-report.json', encoding='utf-8'))
+          print(json.dumps(report, indent=2))
+          assert report['success'] and len(report['passed']) == 5, report
+          PY
+      - name: Upload native evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-native-${{ matrix.os }}
+          path: |
+            plugin-compat-report.json
+            plugin-compat-logs/
+          retention-days: 7

@@ -201,6 +201,9 @@ fn usage_reuses_main_screen_totals_and_filters_without_returning_raw_logs() {
 
 #[test]
 fn isolated_queries_use_a_private_readonly_connection_and_never_wait_for_the_main_mutex() {
+    if crate::config::sqlite_unsupported_in_temp_dir() {
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let db = Database {
         conn: std::sync::Mutex::new(
