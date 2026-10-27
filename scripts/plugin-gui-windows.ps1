@@ -10,11 +10,31 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public static class GuiNative {
+    public delegate bool EnumCallback(IntPtr hwnd, IntPtr lParam);
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumCallback callback, IntPtr data);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    public static IntPtr MainWindow(uint processId) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hwnd, ignored) => {
+            uint pid;
+            Rect rect;
+            GetWindowThreadProcessId(hwnd, out pid);
+            if (pid == processId && IsWindowVisible(hwnd) && GetWindowRect(hwnd, out rect)
+                && rect.Right - rect.Left >= 800 && rect.Bottom - rect.Top >= 500) {
+                found = hwnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
 }
 '@
 [void][GuiNative]::SetProcessDPIAware()
@@ -102,7 +122,8 @@ try {
     $window = Wait-Until {
         $main.Refresh()
         if ($main.HasExited) { throw "Main application exited with $($main.ExitCode)" }
-        if ($main.MainWindowHandle -ne [IntPtr]::Zero -and [GuiNative]::IsWindowVisible($main.MainWindowHandle)) { $main.MainWindowHandle }
+        $handle = [GuiNative]::MainWindow($main.Id)
+        if ($handle -ne [IntPtr]::Zero) { $handle }
     } 'main application window' 90
     $evidence.mainPid = $main.Id
     Click-Element 'Plugins'
