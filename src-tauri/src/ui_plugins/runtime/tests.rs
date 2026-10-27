@@ -109,6 +109,23 @@ async fn stale_stop_cannot_kill_a_new_session_and_renderer_reload_cleans_all_ses
     assert!(sessions().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn exit_waits_for_runtime_cleanup() {
+    let status = Arc::new(Mutex::new(RuntimeStatus {
+        session_id: "wait".into(),
+        state: "running",
+        pid: None,
+    }));
+    let completed = status.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        update(&completed, "closed");
+    });
+    let start = Instant::now();
+    wait_for_cleanup(&[status]).await;
+    assert!(start.elapsed() >= Duration::from_millis(100));
+}
+
 #[test]
 fn child_serves_only_its_snapshot_and_preserves_the_sandbox() {
     let boot = Boot {

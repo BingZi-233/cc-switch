@@ -500,9 +500,6 @@ pub fn run() {
                 return;
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    ui_plugins::runtime::stop_all();
-                }
                 log::info!("收到窗口关闭请求: label={}", window.label());
                 // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
                 let in_db_recovery = crate::init_status::get_init_error()
@@ -2074,10 +2071,13 @@ pub fn run() {
 /// 把接上代理的客户端都指回直连（模式和代理路由保留，下次启动再接上），再停止代理。
 /// 客户端不能一直指着代理：开机自启默认关闭，CC Switch 一关客户端就连不上了。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
-    if let Some(state) = app_handle.try_state::<store::AppState>() {
-        crate::mode::controller::detach_all(state.inner()).await;
-        log::info!("退出清理完成：客户端已指回直连，代理已停止");
-    }
+    let detach = async {
+        if let Some(state) = app_handle.try_state::<store::AppState>() {
+            crate::mode::controller::detach_all(state.inner()).await;
+            log::info!("退出清理完成：客户端已指回直连，代理已停止");
+        }
+    };
+    tokio::join!(ui_plugins::runtime::stop_all_and_wait(), detach);
 }
 
 /// 系统终止应用时最多等退出清理这么久：停代理服务自带 5 秒超时，指回直连只是写几个文件。

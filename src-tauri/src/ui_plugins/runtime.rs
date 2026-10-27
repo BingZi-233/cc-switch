@@ -218,12 +218,37 @@ pub(super) fn stop_plugin(id: &str) {
     }
 }
 
-pub(crate) fn stop_all() {
+pub(crate) fn stop_all() -> Vec<Arc<Mutex<RuntimeStatus>>> {
+    let mut statuses = Vec::new();
     if let Ok(mut sessions) = SESSIONS.lock() {
         for (_, session) in sessions.drain() {
             let _ = session.stop.send(true);
+            statuses.push(session.status);
         }
     }
+    statuses
+}
+
+async fn wait_for_cleanup(statuses: &[Arc<Mutex<RuntimeStatus>>]) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if statuses.iter().all(|status| {
+            status.lock().map_or(true, |status| {
+                !matches!(status.state, "starting" | "running")
+            })
+        }) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!("Timed out waiting for plugin runtime cleanup");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub(crate) async fn stop_all_and_wait() {
+    wait_for_cleanup(&stop_all()).await;
 }
 
 fn update(status: &Mutex<RuntimeStatus>, state: &'static str) {
@@ -496,14 +521,26 @@ async fn supervise(
     let mut child = command(profile.path())?
         .spawn()
         .map_err(|e| e.to_string())?;
-    let tree = ProcessTree::attach(&child)?;
+    let tree = match ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            remove_profile(profile).await;
+            return Err(error);
+        }
+    };
     if let Ok(mut state) = status.lock() {
         state.pid = child.id();
     }
-    let mut input = child.stdin.take().ok_or("Missing child input")?;
-    let mut output = child.stdout.take().ok_or("Missing child output")?;
+    let (Some(mut input), Some(mut output)) = (child.stdin.take(), child.stdout.take()) else {
+        terminate(&mut child, &tree).await;
+        remove_profile(profile).await;
+        return Err("Missing child pipe".into());
+    };
     if let Err(error) = write_frame(&mut input, &boot, MAX_BOOT).await {
         terminate(&mut child, &tree).await;
+        remove_profile(profile).await;
         return Err(error);
     }
     let (sender, mut messages) = mpsc::channel(4);
