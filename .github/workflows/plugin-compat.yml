@@ -57,7 +57,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev xvfb xauth dbus-x11 openbox xdotool wmctrl python3-pyatspi at-spi2-core imagemagick
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev xvfb xauth x11-utils dbus-x11 openbox xdotool wmctrl python3-pyatspi at-spi2-core imagemagick
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           workspaces: src-tauri -> target
@@ -106,13 +106,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version-file: .node-version
+      - uses: pnpm/action-setup@v4
       - name: Install frontend dependencies
-        env:
-          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
-        run: |
-          corepack enable
-          corepack install
-          pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile
       - name: Exercise main window on Linux
         if: runner.os == 'Linux'
         shell: bash
