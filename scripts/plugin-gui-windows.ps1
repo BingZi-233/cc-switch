@@ -199,6 +199,7 @@ try {
     $evidence.exitPluginPid = $pluginPid
     Assert-PluginAlive
     Click-Element 'Settings'
+    Click-Element 'General'
     $setting = $null
     for ($i = 0; $i -lt 15 -and -not $setting; $i++) {
         $setting = Find-Toggle 'Minimize to tray on close'
