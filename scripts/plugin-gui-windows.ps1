@@ -119,7 +119,7 @@ try {
     $evidence.steps += 'opened_plugin'
 
     Click-Element 'Skills'
-    [void](Wait-Until { Find-Element 'More Skills actions' 'Button' } 'Skills page')
+    [void](Wait-Until { Find-Element 'More Skills actions' } 'Skills page')
     Assert-PluginAlive
     $evidence.steps += 'switched_to_skills_same_plugin_window'
     Click-Element 'Plugins'

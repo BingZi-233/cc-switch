@@ -145,6 +145,8 @@ try:
     record("skills", main_window)
     click("Plugins")
     wait_for("restored plugin controls", lambda: visible_element("Stop plugin", "push button"))
+    # Allow at least two one-second status polls before capturing the restored view.
+    time.sleep(3)
     record("plugin-return", main_window)
 
     # _NET_CLOSE_WINDOW is handled by the window manager as a normal close request.

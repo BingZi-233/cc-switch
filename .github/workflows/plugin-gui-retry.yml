@@ -1,0 +1,129 @@
+name: Plugin Main Window Acceptance Retry
+
+on:
+  push:
+    branches: ['codex/plugin-gui-retry-*']
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Plugin Native Compatibility run containing the built binaries
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gui:
+    name: Main window (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify binary provenance and build inputs
+        id: provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REF: ${{ inputs.source_run_id || github.event.head_commit.message }}
+          OS_NAME: ${{ matrix.os }}
+          RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          if [[ "$SOURCE_REF" =~ ^[0-9]+$ ]]; then
+            SOURCE_RUN="$SOURCE_REF"
+          else
+            SOURCE_RUN=$(printf '%s\n' "$SOURCE_REF" | sed -nE 's/^plugin-gui-source-run: ([0-9]+)$/\1/p')
+          fi
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          echo "source_run=$SOURCE_RUN" >> "$GITHUB_OUTPUT"
+          test "$RUNNER_ARCHITECTURE" = X64
+          run="repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN"
+          test "$(gh api "$run" --jq '.path')" = '.github/workflows/plugin-compat.yml'
+          test "$(gh api "$run" --jq '.head_repository.full_name')" = "$GITHUB_REPOSITORY"
+          source_sha=$(gh api "$run" --jq '.head_sha')
+          [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+          job=$(gh api "$run/jobs" --jq ".jobs[] | select(.name == \"Native plugin ($OS_NAME)\") | .id")
+          test -n "$job"
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job" --jq '.steps[] | select(.name == "Build native acceptance binary" and .conclusion == "success") | .name' | grep -qx 'Build native acceptance binary'
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job" --jq '.steps[] | select((.name == "Save Linux acceptance binary" or .name == "Save Windows acceptance binary") and .conclusion == "success") | .name' | grep -qx "Save $([[ "$OS_NAME" == ubuntu-* ]] && echo Linux || echo Windows) acceptance binary"
+          git fetch --no-tags origin "$source_sha"
+          inputs=(src-tauri sdk src assets .github/workflows/plugin-compat.yml rust-toolchain.toml .node-version package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.json tsconfig.node.json postcss.config.cjs tailwind.config.cjs)
+          diff -u <(git ls-tree -r "$source_sha" -- "${inputs[@]}") <(git ls-tree -r HEAD -- "${inputs[@]}")
+          echo "Verified source run $SOURCE_RUN commit $source_sha, $OS_NAME $RUNNER_ARCHITECTURE"
+      - uses: actions/download-artifact@v4
+        with:
+          name: plugin-gui-binary-${{ matrix.os }}
+          path: acceptance-bin
+          run-id: ${{ steps.provenance.outputs.source_run }}
+          github-token: ${{ github.token }}
+      - name: Install Linux display dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-0 libayatana-appindicator3-1 libwebkit2gtk-4.1-0 libsoup-3.0-0 xvfb xauth x11-utils dbus-x11 openbox xdotool wmctrl python3-pyatspi at-spi2-core imagemagick
+          chmod +x acceptance-bin/cc-switch
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - uses: pnpm/action-setup@v4
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Exercise main window on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GDK_BACKEND: x11
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/plugin-gui-home"
+          evidence="$GITHUB_WORKSPACE/plugin-gui-evidence"
+          mkdir -p "$evidence"
+          python3 scripts/plugin-gui-fixture.py "$home"
+          pnpm exec vite --host 127.0.0.1 --port 3000 --strictPort > "$evidence/vite.log" 2>&1 &
+          vite_pid=$!
+          trap 'kill "$vite_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3000/ >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:3000/ >/dev/null
+          timeout 180s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' /usr/bin/python3 scripts/plugin-main-window-linux.py "$GITHUB_WORKSPACE/acceptance-bin/cc-switch" "$home" "$evidence"
+      - name: Exercise main window on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $homeDir = Join-Path $env:RUNNER_TEMP 'plugin-gui-home'
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'plugin-gui-evidence'
+          New-Item -ItemType Directory -Force $evidence | Out-Null
+          python scripts/plugin-gui-fixture.py $homeDir
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture setup failed' }
+          $vite = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'pnpm exec vite --host 127.0.0.1 --port 3000 --strictPort' -RedirectStandardOutput "$evidence/vite.log" -RedirectStandardError "$evidence/vite-error.log" -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              try { Invoke-WebRequest -UseBasicParsing 'http://127.0.0.1:3000/' | Out-Null; $ready = $true; break } catch { Start-Sleep -Seconds 1 }
+            }
+            if (-not $ready) { throw 'Vite did not start' }
+            & powershell -NoProfile -File scripts/plugin-gui-windows.ps1 -Binary (Join-Path $env:GITHUB_WORKSPACE 'acceptance-bin/cc-switch.exe') -TestHome $homeDir -Report (Join-Path $evidence 'report.json')
+            if ($LASTEXITCODE -ne 0) { throw 'Windows main-window acceptance failed' }
+          } finally {
+            & taskkill /PID $vite.Id /T /F 2>$null
+          }
+      - name: Verify main-window evidence
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('plugin-gui-evidence/report.json', encoding='utf-8-sig'))
+          print(json.dumps(report, indent=2))
+          assert report['success'] and len(report['steps']) >= 4, report
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: plugin-gui-retry-${{ matrix.os }}
+          path: plugin-gui-evidence/
+          retention-days: 7
