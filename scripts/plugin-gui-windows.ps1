@@ -79,6 +79,13 @@ function Plugin-Process {
     return $null
 }
 
+function Plugin-Ready {
+    try {
+        $record = Get-Content -Raw (Join-Path $TestHome '.cc-switch/ui-plugins/plugin-test.gui-acceptance.json') | ConvertFrom-Json
+        return $record.storage.ready -eq $true
+    } catch { return $false }
+}
+
 function Assert-PluginAlive {
     $child = Plugin-Process
     if (-not $child -or $child.ProcessId -ne $pluginPid) { throw 'Plugin process changed or exited' }
@@ -100,7 +107,7 @@ try {
     Click-Element 'Plugins'
     [void](Wait-Until { Find-Element 'GUI Acceptance' } 'installed plugin')
     Click-Element 'Open'
-    [void](Wait-Until { Find-Element 'Plugin is open in a separate window' } 'running plugin status' 60)
+    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Plugin-Ready) } 'running and connected plugin' 60)
     $child = Wait-Until { Plugin-Process } 'plugin host process'
     $pluginPid = $child.ProcessId
     $evidence.pluginPid = $pluginPid
@@ -115,7 +122,7 @@ try {
     Assert-PluginAlive
     $evidence.steps += 'switched_to_skills_same_plugin_window'
     Click-Element 'Plugins'
-    [void](Wait-Until { Find-Element 'Plugin is open in a separate window' } 'returned plugin status')
+    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Plugin-Ready) } 'returned plugin status')
     Assert-PluginAlive
     Screenshot 'windows-returned'
     $evidence.steps += 'returned_to_plugin_same_window'
@@ -131,7 +138,7 @@ try {
     # A second launch uses the application's normal single-instance activation to restore the main window.
     $activation = Start-Process -FilePath $Binary -PassThru
     [void](Wait-Until { [GuiNative]::IsWindowVisible($window) } 'main window restored from tray' 60)
-    [void](Wait-Until { Find-Element 'Plugin is open in a separate window' } 'plugin status after restore')
+    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Plugin-Ready) } 'plugin status after restore')
     Assert-PluginAlive
     Click-Element 'Stop plugin'
     [void](Wait-Until { -not (Get-Process -Id $pluginPid -ErrorAction SilentlyContinue) } 'plugin process exit')

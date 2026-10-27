@@ -105,6 +105,11 @@ def plugin_alive(pid):
     return children(app.pid) == [pid] and bool(window_for(pid)) and mapped(window_for(pid))
 
 
+def fixture_ready():
+    path = home / ".cc-switch/ui-plugins/plugin-test.gui-acceptance.json"
+    return json.loads(path.read_text()).get("storage") == {"ready": True}
+
+
 def record(step, main_window):
     if app.poll() is not None or not plugin_alive(plugin_pid):
         raise RuntimeError(f"Plugin window or process was lost at {step}")
@@ -129,7 +134,9 @@ try:
     click("Open")
     plugin_pid = wait_for("plugin child", lambda: next(iter(children(app.pid)), None))
     wait_for("plugin native window", lambda: plugin_alive(plugin_pid))
-    wait_for("running status", lambda: visible_element("Plugin is open in a separate window"))
+    wait_for("plugin SDK ready", fixture_ready)
+    run("wmctrl", "-ia", main_window)
+    wait_for("plugin controls", lambda: visible_element("Stop plugin", "push button"))
     record("plugin-open", main_window)
 
     run("wmctrl", "-ia", main_window)
@@ -137,7 +144,7 @@ try:
     wait_for("Skills page", lambda: visible_element("More Skills actions", "push button"))
     record("skills", main_window)
     click("Plugins")
-    wait_for("restored plugin status", lambda: visible_element("Plugin is open in a separate window"))
+    wait_for("restored plugin controls", lambda: visible_element("Stop plugin", "push button"))
     record("plugin-return", main_window)
 
     # _NET_CLOSE_WINDOW is handled by the window manager as a normal close request.

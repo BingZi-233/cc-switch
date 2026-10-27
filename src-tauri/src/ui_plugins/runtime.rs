@@ -157,12 +157,22 @@ fn remove_abandoned_profiles(root: &Path, candidates: Vec<(PathBuf, u32)>) {
         return;
     }
     for (path, pid) in candidates {
-        if owner_gone(pid) && fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
-            if let Err(error) = fs::remove_dir_all(&path) {
-                log::warn!(
-                    "Could not remove abandoned plugin profile {}: {error}",
-                    path.display()
-                );
+        for attempt in 0..=40 {
+            if !owner_gone(pid)
+                || !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir())
+            {
+                break;
+            }
+            match fs::remove_dir_all(&path) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) if attempt == 40 => {
+                    log::warn!(
+                        "Could not remove abandoned plugin profile {}: {error}",
+                        path.display()
+                    );
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(250)),
             }
         }
     }

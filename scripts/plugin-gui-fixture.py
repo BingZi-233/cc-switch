@@ -27,7 +27,7 @@ record = {
         "permissions": [],
     },
     "enabled": True,
-    "documents": {"main": "<!doctype html><meta charset='utf-8'><h1>GUI Acceptance</h1>"},
+    "documents": {"main": "<!doctype html><meta charset='utf-8'><h1>GUI Acceptance</h1><script>CCSwitch.ready.then(() => CCSwitch.setStorage({ready:true}));</script>"},
     "storage": None,
     "granted_permissions": [],
     "access_revision": "gui-acceptance",
