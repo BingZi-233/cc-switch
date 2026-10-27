@@ -198,6 +198,8 @@ try {
     } 'reopened plugin native window')
     $evidence.exitPluginPid = $pluginPid
     Assert-PluginAlive
+    # The runner's taskbar can cover the sidebar footer on an unmaximized window.
+    Click-Element 'Maximize window'
     Click-Element 'Settings'
     Click-Element 'General'
     $setting = $null
