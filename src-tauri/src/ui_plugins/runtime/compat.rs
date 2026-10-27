@@ -72,6 +72,7 @@ fn setup(home: &Path) -> Result<Arc<Database>> {
         },
         enabled: true,
         documents: BTreeMap::from([("main".into(), String::new())]),
+        documents_version: None,
         storage: json!({"note":"preserved"}),
         granted_permissions: vec![PluginPermission::ProvidersRead, PluginPermission::UsageRead],
         access_revision: uuid::Uuid::new_v4().to_string(),
@@ -127,6 +128,7 @@ CCSwitch.ready.then(async context => {{
     with_registry_async(move |root| {
         let mut record = read_record(root, ID)?;
         record.documents.insert("main".into(), script);
+        record.documents_version = None;
         record.granted_permissions = if denied {
             vec![PluginPermission::ProvidersRead]
         } else {
@@ -136,6 +138,10 @@ CCSwitch.ready.then(async context => {{
         write_record(root, &record)
     })
     .await?;
+    launch_existing(db).await
+}
+
+async fn launch_existing(db: &Arc<Database>) -> Result<String> {
     let status = start(
         db.clone(),
         ID.into(),
@@ -328,11 +334,14 @@ fn passed(report: &mut Value, name: &str) {
 
 async fn run(report: &mut Value) -> Result<()> {
     let home = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let profiles = home.path().join("runtime-profiles");
+    fs::create_dir(&profiles).map_err(|e| e.to_string())?;
+    std::env::set_var("CC_SWITCH_PLUGIN_TEST_TEMP_ROOT", &profiles);
     let db = setup(home.path())?;
     let launch_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let original_dir = std::env::current_dir().map_err(|e| e.to_string())?;
     std::env::set_current_dir(launch_dir.path()).map_err(|e| e.to_string())?;
-    let result = run_scenarios(report, &db).await;
+    let result = run_scenarios(report, &db, &profiles).await;
     std::env::set_current_dir(original_dir).map_err(|e| e.to_string())?;
     let entries = fs::read_dir(launch_dir.path())
         .map_err(|e| e.to_string())?
@@ -349,11 +358,68 @@ async fn run(report: &mut Value) -> Result<()> {
     Ok(())
 }
 
-async fn run_scenarios(report: &mut Value, db: &Arc<Database>) -> Result<()> {
+async fn wait_profiles_clean(profiles: &Path, scenario: &str) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = fs::read_dir(profiles)
+            .map_err(|e| e.to_string())?
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| e.to_string())?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Runtime profiles remain after {scenario}: {entries:?}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn run_scenarios(report: &mut Value, db: &Arc<Database>, profiles: &Path) -> Result<()> {
     let normal = launch(db, "normal", false, false).await?;
     let pid = wait_ready(&normal, "normal", false).await?;
     stop(&normal, pid).await?;
+    wait_profiles_clean(profiles, "normal stop").await?;
     passed(report, "native_webview_sdk_storage_providers_usage");
+
+    let old = launch(db, "before-upgrade", false, false).await?;
+    let pid = wait_ready(&old, "before-upgrade", false).await?;
+    let source = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let (mut manifest, html) = with_registry_async(|root| {
+        let record = read_record(root, ID)?;
+        Ok((record.manifest, record.documents["main"].clone()))
+    })
+    .await?;
+    manifest.version = "2".into();
+    fs::write(
+        source.path().join("cc-switch-plugin.json"),
+        serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        source.path().join("index.html"),
+        html.replace("before-upgrade", "after-upgrade"),
+    )
+    .map_err(|e| e.to_string())?;
+    let updated =
+        super::super::install_ui_plugin(source.path().to_string_lossy().into_owned()).await?;
+    if !updated.enabled
+        || updated.manifest.version != "2"
+        || updated.granted_permissions != manifest.permissions
+    {
+        return Err("Upgrade did not preserve enabled state and grants".into());
+    }
+    wait_state(&old, "closed", pid).await?;
+    stop(&old, pid).await?;
+    wait_profiles_clean(profiles, "upgrade").await?;
+    let upgraded = launch_existing(db).await?;
+    let pid = wait_ready(&upgraded, "after-upgrade", false).await?;
+    stop(&upgraded, pid).await?;
+    wait_profiles_clean(profiles, "upgraded stop").await?;
+    passed(report, "upgrade_preserves_data_grants_and_reopens_new_page");
     let hung = launch(db, "hang", true, false).await?;
     let pid = wait_ready(&hung, "hang", false).await?;
     let renderers = descendants(pid)?;
@@ -363,6 +429,7 @@ async fn run_scenarios(report: &mut Value, db: &Arc<Database>) -> Result<()> {
         wait_exit(child).await?;
     }
     stop(&hung, pid).await?;
+    wait_profiles_clean(profiles, "watchdog").await?;
     passed(report, "infinite_loop_watchdog_host_remains_responsive");
     let restart = launch(db, "restart", false, false).await?;
     let pid = wait_ready(&restart, "restart", false).await?;
@@ -373,6 +440,7 @@ async fn run_scenarios(report: &mut Value, db: &Arc<Database>) -> Result<()> {
         wait_exit(child).await?;
     }
     stop(&restart, pid).await?;
+    wait_profiles_clean(profiles, "child crash").await?;
     passed(
         report,
         "restart_preserves_storage_and_child_crash_is_contained",
@@ -382,8 +450,22 @@ async fn run_scenarios(report: &mut Value, db: &Arc<Database>) -> Result<()> {
     super::super::set_ui_plugin_enabled(ID.into(), false, None).await?;
     wait_state(&limited, "closed", pid).await?;
     stop(&limited, pid).await?;
+    wait_profiles_clean(profiles, "disable").await?;
     passed(report, "permission_denial_and_disable_terminate_runtime");
     parent_crash(report).await?;
+    report["parentCrashProfileEntries"] = json!(fs::read_dir(profiles)
+        .map_err(|e| e.to_string())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?);
+    report["runtimeProfilesCleanBeforeParentCrash"] = json!(true);
+    let abandoned = abandoned_profiles(profiles);
+    if abandoned.is_empty() {
+        return Err("Parent crash did not leave a detectable abandoned profile".into());
+    }
+    remove_abandoned_profiles(profiles, abandoned);
+    wait_profiles_clean(profiles, "abandoned profile recovery").await?;
+    report["parentCrashProfileRecoveryClean"] = json!(true);
     passed(report, "parent_crash_terminates_child");
     Ok(())
 }

@@ -1,6 +1,37 @@
 use super::*;
 
 #[test]
+fn abandoned_profile_cleanup_preserves_live_and_unrecognized_directories() {
+    let root = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    #[cfg(windows)]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/C", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    assert!(owner_gone(dead_pid));
+    let abandoned = root.path().join(format!("plugin-{dead_pid}-abc123"));
+    let live = root
+        .path()
+        .join(format!("plugin-{}-abc123", std::process::id()));
+    let unrelated = root.path().join("cc-switch-plugin-abcdef");
+    for path in [&abandoned, &live, &unrelated] {
+        fs::create_dir(path).unwrap();
+    }
+    let candidates = abandoned_profiles(root.path());
+    assert_eq!(candidates, vec![(abandoned.clone(), dead_pid)]);
+    remove_abandoned_profiles(root.path(), candidates);
+    assert!(!abandoned.exists());
+    assert!(live.exists() && unrelated.exists());
+}
+
+#[test]
 fn child_command_uses_its_private_directory_and_preserves_windows_system_paths() {
     let profile = tempfile::tempdir().unwrap();
     let command = command(profile.path()).unwrap();
@@ -76,6 +107,23 @@ async fn stale_stop_cannot_kill_a_new_session_and_renderer_reload_cleans_all_ses
     stop_all();
     assert!(*receivers[1].borrow());
     assert!(sessions().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn exit_waits_for_runtime_cleanup() {
+    let status = Arc::new(Mutex::new(RuntimeStatus {
+        session_id: "wait".into(),
+        state: "running",
+        pid: None,
+    }));
+    let completed = status.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        update(&completed, "closed");
+    });
+    let start = Instant::now();
+    wait_for_cleanup(&[status]).await;
+    assert!(start.elapsed() >= Duration::from_millis(100));
 }
 
 #[test]

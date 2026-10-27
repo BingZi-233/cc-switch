@@ -77,7 +77,10 @@ pub struct PluginList {
 struct PluginRecord {
     manifest: PluginManifest,
     enabled: bool,
+    #[serde(default, skip_serializing)]
     documents: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    documents_version: Option<String>,
     storage: Value,
     #[serde(default)]
     granted_permissions: Vec<PluginPermission>,
@@ -176,11 +179,72 @@ fn record_path(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(root.join(format!("plugin-{id}.json")))
 }
 
+fn documents_path(root: &Path, id: &str, version: &str) -> Result<PathBuf> {
+    if !valid_id(id) || uuid::Uuid::parse_str(version).is_err() {
+        return Err("Invalid plugin document snapshot".into());
+    }
+    Ok(root.join(format!("plugin-{id}.documents")).join(version))
+}
+
+fn ensure_documents_directory(root: &Path, id: &str) -> Result<PathBuf> {
+    if !valid_id(id) {
+        return Err("Invalid plugin ID".into());
+    }
+    let directory = root.join(format!("plugin-{id}.documents"));
+    if !fs::symlink_metadata(&directory)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("Invalid plugin document directory".into());
+    }
+    Ok(directory)
+}
+
+fn clean_old_documents(root: &Path, id: &str, current: &str) {
+    let Ok(directory) = ensure_documents_directory(root, id) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == current || uuid::Uuid::parse_str(name).is_err() {
+            continue;
+        }
+        if let Err(error) = fs::remove_dir_all(entry.path()) {
+            log::warn!("Failed to remove old plugin documents for {id}: {error}");
+        }
+    }
+}
+
 fn read_record(root: &Path, id: &str) -> Result<PluginRecord> {
-    let record: PluginRecord =
+    let mut record: PluginRecord =
         serde_json::from_str(&read_bounded(&record_path(root, id)?, MAX_RECORD)?)
             .map_err(|e| e.to_string())?;
     validate_manifest(&record.manifest)?;
+    if let Some(version) = &record.documents_version {
+        ensure_documents_directory(root, id)?;
+        let directory = documents_path(root, id, version)?;
+        if !fs::symlink_metadata(&directory)
+            .map_err(|e| e.to_string())?
+            .file_type()
+            .is_dir()
+        {
+            return Err("Invalid plugin document snapshot".into());
+        }
+        record.documents = record
+            .manifest
+            .pages
+            .iter()
+            .map(|page| {
+                read_bounded(&directory.join(format!("{}.html", page.id)), MAX_HTML)
+                    .map(|html| (page.id.clone(), html))
+            })
+            .collect::<Result<_>>()?;
+    }
     if record.manifest.id != id
         || record.documents.len() != record.manifest.pages.len()
         || record
@@ -199,9 +263,45 @@ fn read_record(root: &Path, id: &str) -> Result<PluginRecord> {
 }
 
 fn write_record(root: &Path, record: &PluginRecord) -> Result<()> {
-    let bytes = serde_json::to_vec(record).map_err(|e| e.to_string())?;
-    crate::config::atomic_write_private(&record_path(root, &record.manifest.id)?, &bytes)
-        .map_err(|e| e.to_string())
+    let path = record_path(root, &record.manifest.id)?;
+    let new_version = record
+        .documents_version
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let new_snapshot = record.documents_version.is_none();
+    let directory = documents_path(root, &record.manifest.id, &new_version)?;
+    let mut created_snapshot = false;
+    let result = (|| {
+        if new_snapshot {
+            fs::create_dir_all(root).map_err(|e| e.to_string())?;
+            let parent = root.join(format!("plugin-{}.documents", record.manifest.id));
+            match fs::create_dir(&parent) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.to_string()),
+            }
+            ensure_documents_directory(root, &record.manifest.id)?;
+            fs::create_dir(&directory).map_err(|e| e.to_string())?;
+            created_snapshot = true;
+            for (id, html) in &record.documents {
+                crate::config::atomic_write_private(
+                    &directory.join(format!("{id}.html")),
+                    html.as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        let mut value = serde_json::to_value(record).map_err(|e| e.to_string())?;
+        value["documents_version"] = Value::String(new_version.clone());
+        let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+        crate::config::atomic_write_private(&path, &bytes).map_err(|e| e.to_string())
+    })();
+    if result.is_err() && created_snapshot {
+        let _ = fs::remove_dir_all(&directory);
+    } else if result.is_ok() {
+        clean_old_documents(root, &record.manifest.id, &new_version);
+    }
+    result
 }
 
 fn list(root: &Path) -> Result<PluginList> {
@@ -225,11 +325,16 @@ fn list(root: &Path) -> Result<PluginList> {
             continue;
         }
         match read_record(root, id) {
-            Ok(record) => result.plugins.push(InstalledPlugin {
-                manifest: record.manifest,
-                enabled: record.enabled,
-                granted_permissions: record.granted_permissions,
-            }),
+            Ok(record) => {
+                if let Some(version) = &record.documents_version {
+                    clean_old_documents(root, id, version);
+                }
+                result.plugins.push(InstalledPlugin {
+                    manifest: record.manifest,
+                    enabled: record.enabled,
+                    granted_permissions: record.granted_permissions,
+                });
+            }
             Err(error) => result.problems.push(PluginProblem {
                 id: id.into(),
                 error,
@@ -250,18 +355,18 @@ fn install(root: &Path, directory: &Path) -> Result<InstalledPlugin> {
     )?)
     .map_err(|e| e.to_string())?;
     validate_manifest(&manifest)?;
-    if record_path(root, &manifest.id)?
+    let previous = if record_path(root, &manifest.id)?
         .try_exists()
         .map_err(|e| e.to_string())?
     {
-        return Err(
-            "Plugin already installed; uninstall it before installing another version".into(),
-        );
-    }
-    let installed = list(root)?;
-    if installed.plugins.len() + installed.problems.len() >= 64 {
-        return Err("At most 64 plugins may be installed".into());
-    }
+        Some(read_record(root, &manifest.id)?)
+    } else {
+        let installed = list(root)?;
+        if installed.plugins.len() + installed.problems.len() >= 64 {
+            return Err("At most 64 plugins may be installed".into());
+        }
+        None
+    };
     let mut documents = BTreeMap::new();
     let mut size = 0;
     for page in &manifest.pages {
@@ -275,19 +380,30 @@ fn install(root: &Path, directory: &Path) -> Result<InstalledPlugin> {
         }
         documents.insert(page.id.clone(), html);
     }
+    let (enabled, storage, granted_permissions) = previous
+        .map(|record| {
+            let grants = record
+                .granted_permissions
+                .into_iter()
+                .filter(|permission| manifest.permissions.contains(permission))
+                .collect();
+            (record.enabled, record.storage, grants)
+        })
+        .unwrap_or((false, Value::Null, Vec::new()));
     let record = PluginRecord {
         manifest,
-        enabled: false,
+        enabled,
         documents,
-        storage: Value::Null,
-        granted_permissions: Vec::new(),
+        documents_version: None,
+        storage,
+        granted_permissions,
         access_revision: uuid::Uuid::new_v4().to_string(),
     };
     write_record(root, &record)?;
     Ok(InstalledPlugin {
         manifest: record.manifest,
-        enabled: false,
-        granted_permissions: Vec::new(),
+        enabled: record.enabled,
+        granted_permissions: record.granted_permissions,
     })
 }
 
@@ -346,6 +462,7 @@ fn authorize(root: &Path, id: &str, permission: PluginPermission) -> Result<Stri
     Ok(record.access_revision)
 }
 
+#[cfg(test)]
 fn check_revision(
     root: &Path,
     id: &str,
@@ -405,7 +522,9 @@ pub async fn list_ui_plugins() -> Result<PluginList> {
 
 #[tauri::command]
 pub async fn install_ui_plugin(directory: String) -> Result<InstalledPlugin> {
-    with_registry_async(move |root| install(root, Path::new(&directory))).await
+    let installed = with_registry_async(move |root| install(root, Path::new(&directory))).await?;
+    runtime::stop_plugin(&installed.manifest.id);
+    Ok(installed)
 }
 
 #[tauri::command]
@@ -434,22 +553,19 @@ pub async fn set_ui_plugin_permissions(
 #[tauri::command]
 pub async fn uninstall_ui_plugin(id: String) -> Result<()> {
     let plugin_id = id.clone();
-    with_registry_async(move |root| {
-        fs::remove_file(record_path(root, &id)?).map_err(|e| e.to_string())
+    let result = with_registry_async(move |root| {
+        fs::remove_file(record_path(root, &id)?).map_err(|e| e.to_string())?;
+        let documents = root.join(format!("plugin-{id}.documents"));
+        if let Err(error) = fs::remove_dir_all(documents) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("Plugin was uninstalled, but its document directory could not be removed: {error}"));
+            }
+        }
+        Ok(())
     })
-    .await?;
+    .await;
     runtime::stop_plugin(&plugin_id);
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn get_ui_plugin_storage(id: String) -> Result<Value> {
-    with_registry_async(move |root| storage(root, &id, None)).await
-}
-
-#[tauri::command]
-pub async fn set_ui_plugin_storage(id: String, value: Value) -> Result<()> {
-    with_registry_async(move |root| storage(root, &id, Some(value)).map(|_| ())).await
+    result
 }
 
 fn page_html(root: &Path, path: &str) -> Result<String> {

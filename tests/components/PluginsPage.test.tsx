@@ -113,9 +113,12 @@ describe("plugin management", () => {
     expect(mocks.setEnabled).not.toHaveBeenCalled();
     expect(
       screen.getByRole("checkbox", { name: /plugins.providersRead / }),
-    ).toBeChecked();
-    fireEvent.click(
+    ).not.toBeChecked();
+    expect(
       screen.getByRole("checkbox", { name: /plugins.usageRead / }),
+    ).not.toBeChecked();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: /plugins.providersRead / }),
     );
     fireEvent.click(
       screen.getAllByRole("button", { name: "plugins.enable" }).at(-1)!,
@@ -165,6 +168,11 @@ describe("plugin management", () => {
         expect.any(Object),
       ),
     );
+    expect(mocks.stopRuntime).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("plugins.back"));
+    expect(mocks.stopRuntime).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("plugins.open"));
+    expect(mocks.startRuntime).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByLabelText("plugins.back"));
     fireEvent.click(screen.getByText("plugins.disable"));
     await waitFor(() =>
@@ -176,6 +184,26 @@ describe("plugin management", () => {
     await screen.findByText("plugins.empty");
     expect(mocks.uninstall).toHaveBeenCalledWith("test.notes");
     expect(parseView("plugins")).toBe("plugins");
+  });
+
+  it("closes old page state after updating an installed plugin", async () => {
+    state.plugins = [{ ...structuredClone(plugin), enabled: true }];
+    mocks.install.mockImplementation(async () => {
+      state.plugins[0].manifest.version = "2.0.0";
+      return structuredClone(state.plugins[0]);
+    });
+    mount();
+    await screen.findByText("Test notes");
+    fireEvent.click(screen.getByText("plugins.open"));
+    await waitFor(() => expect(mocks.startRuntime).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByLabelText("plugins.back"));
+    fireEvent.click(screen.getByRole("button", { name: "plugins.install" }));
+    await waitFor(() =>
+      expect(mocks.stopRuntime).toHaveBeenCalledWith("session-1"),
+    );
+    await screen.findByText(/2\.0\.0/);
+    fireEvent.click(screen.getByText("plugins.open"));
+    await waitFor(() => expect(mocks.startRuntime).toHaveBeenCalledTimes(2));
   });
 
   it("cancellation performs no install; failed install leaves the list and exposes a retryable error", async () => {
@@ -196,6 +224,20 @@ describe("plugin management", () => {
     fireEvent.click(screen.getByRole("button", { name: "plugins.install" }));
     await screen.findByText("Test notes");
     expect(screen.queryByText("Invalid manifest")).not.toBeInTheDocument();
+  });
+
+  it("refreshes the list when uninstall partially succeeds", async () => {
+    state.plugins = [structuredClone(plugin)];
+    mocks.uninstall.mockImplementation(async () => {
+      state.plugins = [];
+      throw new Error("Cleanup failed");
+    });
+    mount();
+    await screen.findByText("Test notes");
+    fireEvent.click(screen.getByLabelText("plugins.uninstallNamed"));
+    fireEvent.click(screen.getByRole("button", { name: "plugins.uninstall" }));
+    await screen.findByText("plugins.empty");
+    expect(screen.getAllByText(/Cleanup failed/).length).toBeGreaterThan(0);
   });
 
   it("shows corrupt entries alongside valid plugins", async () => {

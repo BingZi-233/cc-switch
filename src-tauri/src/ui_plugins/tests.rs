@@ -41,7 +41,6 @@ fn lifecycle_persists_snapshots_and_scoped_storage() {
     assert!(!item.enabled);
     assert!(page_html(&root, &format!("/{id}/notes")).is_err());
     assert!(storage(&root, id, Some(json!("no"))).is_err());
-    assert!(install(&root, &source).is_err());
     set_enabled(&root, id, true, None).unwrap();
     let original = page_html(&root, &format!("/{id}/notes")).unwrap();
     fs::write(source.join("index.html"), "changed after installation").unwrap();
@@ -58,6 +57,101 @@ fn lifecycle_persists_snapshots_and_scoped_storage() {
     fs::remove_file(record_path(&root, id).unwrap()).unwrap();
     assert!(list(&root).unwrap().plugins.is_empty());
     assert!(source.join("index.html").exists());
+}
+
+#[test]
+fn pages_are_separate_and_legacy_records_migrate_without_losing_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let root = temp.path().join("installed");
+    package(&source);
+    let id = install(&root, &source).unwrap().manifest.id;
+    let path = record_path(&root, &id).unwrap();
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(record.get("documents").is_none());
+    let version = record["documents_version"].as_str().unwrap();
+    let snapshot = documents_path(&root, &id, version).unwrap();
+    assert!(snapshot.join("notes.html").exists());
+    let orphan = documents_path(&root, &id, &uuid::Uuid::new_v4().to_string()).unwrap();
+    fs::create_dir_all(&orphan).unwrap();
+    list(&root).unwrap();
+    assert!(!orphan.exists());
+    assert!(snapshot.join("notes.html").exists());
+
+    // Simulate the old single-file format and migrate on the next state change.
+    record["documents"] = json!({
+        "notes": fs::read_to_string(snapshot.join("notes.html")).unwrap(),
+        "about": fs::read_to_string(snapshot.join("about.html")).unwrap(),
+    });
+    record["storage"] = json!({"note": "preserved"});
+    record.as_object_mut().unwrap().remove("documents_version");
+    fs::write(&path, record.to_string()).unwrap();
+    set_enabled(&root, &id, true, None).unwrap();
+    assert_eq!(
+        storage(&root, &id, None).unwrap(),
+        json!({"note": "preserved"})
+    );
+    assert!(page_html(&root, &format!("/{id}/notes"))
+        .unwrap()
+        .contains("Notes"));
+    let migrated: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(migrated.get("documents").is_none());
+    assert!(migrated["documents_version"].is_string());
+}
+
+#[test]
+fn upgrading_preserves_data_and_existing_grants_without_granting_new_permissions() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let root = temp.path().join("installed");
+    package(&source);
+    let mut definition = manifest();
+    definition["permissions"] = json!(["providers.read"]);
+    fs::write(source.join("cc-switch-plugin.json"), definition.to_string()).unwrap();
+    let id = install(&root, &source).unwrap().manifest.id;
+    set_enabled(
+        &root,
+        &id,
+        true,
+        Some(vec![PluginPermission::ProvidersRead]),
+    )
+    .unwrap();
+    storage(&root, &id, Some(json!({"note": "keep"}))).unwrap();
+    let revision = read_record(&root, &id).unwrap().access_revision;
+
+    definition["version"] = json!("2.0.0");
+    definition["permissions"] = json!(["providers.read", "usage.read"]);
+    fs::write(source.join("cc-switch-plugin.json"), definition.to_string()).unwrap();
+    fs::write(source.join("index.html"), "updated page").unwrap();
+    let upgraded = install(&root, &source).unwrap();
+    assert!(upgraded.enabled);
+    assert_eq!(upgraded.manifest.version, "2.0.0");
+    assert_eq!(
+        upgraded.granted_permissions,
+        vec![PluginPermission::ProvidersRead]
+    );
+    assert_eq!(storage(&root, &id, None).unwrap(), json!({"note": "keep"}));
+    assert_eq!(
+        page_html(&root, &format!("/{id}/notes")).unwrap(),
+        "updated page"
+    );
+    assert_ne!(read_record(&root, &id).unwrap().access_revision, revision);
+
+    fs::remove_file(source.join("about.html")).unwrap();
+    assert!(install(&root, &source).is_err());
+    assert_eq!(storage(&root, &id, None).unwrap(), json!({"note": "keep"}));
+    assert_eq!(
+        page_html(&root, &format!("/{id}/notes")).unwrap(),
+        "updated page"
+    );
+
+    fs::write(source.join("about.html"), "updated about").unwrap();
+    definition["permissions"] = json!(["usage.read"]);
+    fs::write(source.join("cc-switch-plugin.json"), definition.to_string()).unwrap();
+    assert!(install(&root, &source)
+        .unwrap()
+        .granted_permissions
+        .is_empty());
 }
 
 #[test]
@@ -130,6 +224,21 @@ fn symbolic_links_cannot_import_external_content() {
     fs::remove_file(source.join("index.html")).unwrap();
     std::os::unix::fs::symlink(temp.path().join("secret"), source.join("index.html")).unwrap();
     assert!(install(&temp.path().join("installed"), &source).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn document_directory_cannot_be_a_symlink() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source");
+    let root = temp.path().join("installed");
+    let external = temp.path().join("external");
+    package(&source);
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&external).unwrap();
+    std::os::unix::fs::symlink(&external, root.join("plugin-test.fixture.documents")).unwrap();
+    assert!(install(&root, &source).is_err());
+    assert_eq!(fs::read_dir(external).unwrap().count(), 0);
 }
 
 #[tokio::test(flavor = "current_thread")]

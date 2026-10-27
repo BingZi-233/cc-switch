@@ -51,14 +51,7 @@ export const uiPluginsApi = {
     invoke<void>("set_ui_plugin_enabled", { id, enabled, grantedPermissions }),
   setPermissions: (id: string, grantedPermissions: PluginPermission[]) =>
     invoke<void>("set_ui_plugin_permissions", { id, grantedPermissions }),
-  getProviders: (id: string, query: unknown) =>
-    invoke<unknown>("get_ui_plugin_providers", { id, query }),
-  getUsage: (id: string, query: unknown) =>
-    invoke<unknown>("get_ui_plugin_usage", { id, query }),
   uninstall: (id: string) => invoke<void>("uninstall_ui_plugin", { id }),
-  getStorage: (id: string) => invoke<unknown>("get_ui_plugin_storage", { id }),
-  setStorage: (id: string, value: unknown) =>
-    invoke<void>("set_ui_plugin_storage", { id, value }),
   startRuntime: (id: string, page: string, appearance: PluginAppearance) =>
     invoke<PluginRuntimeStatus>("start_ui_plugin_runtime", {
       id,

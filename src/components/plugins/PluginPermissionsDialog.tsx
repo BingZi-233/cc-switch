@@ -29,9 +29,7 @@ export function PluginPermissionsDialog({
 }) {
   const { t } = useTranslation();
   const [grants, setGrants] = useState<PluginPermission[]>(
-    enabling
-      ? (plugin.manifest.permissions ?? [])
-      : (plugin.grantedPermissions ?? []),
+    plugin.grantedPermissions ?? [],
   );
   return (
     <Dialog

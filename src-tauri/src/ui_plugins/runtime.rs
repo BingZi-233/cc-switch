@@ -87,6 +87,122 @@ struct Session {
 static SESSIONS: std::sync::LazyLock<Mutex<HashMap<String, Session>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static REQUEST_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static PROFILE_CLEANUP: std::sync::Once = std::sync::Once::new();
+
+fn profile_root() -> PathBuf {
+    #[cfg(feature = "test-hooks")]
+    if let Some(root) = std::env::var_os("CC_SWITCH_PLUGIN_TEST_TEMP_ROOT") {
+        return root.into();
+    }
+    crate::config::get_app_config_dir().join("ui-plugin-profiles")
+}
+
+// Only a definitely absent owner is safe to clean; access denied is not absence.
+fn owner_gone(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        (unsafe { libc::kill(pid as i32, 0) == -1 })
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, ERROR_INVALID_PARAMETER},
+            System::Threading::*,
+        };
+        if pid == 0 {
+            return false;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return std::io::Error::last_os_error().raw_os_error()
+                == Some(ERROR_INVALID_PARAMETER as i32);
+        }
+        let mut code = 0;
+        let gone = GetExitCodeProcess(process, &mut code) != 0 && code != 259;
+        CloseHandle(process);
+        gone
+    }
+}
+
+fn abandoned_profiles(root: &Path) -> Vec<(PathBuf, u32)> {
+    if !fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_dir()) {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let name = entry.file_name();
+            let (pid, suffix) = name.to_str()?.strip_prefix("plugin-")?.split_once('-')?;
+            if suffix.len() != 6 || !suffix.bytes().all(|c| c.is_ascii_alphanumeric()) {
+                return None;
+            }
+            let pid: u32 = pid.parse().ok()?;
+            owner_gone(pid).then(|| (entry.path(), pid))
+        })
+        .collect()
+}
+
+fn remove_abandoned_profiles(root: &Path, candidates: Vec<(PathBuf, u32)>) {
+    if !fs::symlink_metadata(root).is_ok_and(|m| m.file_type().is_dir()) {
+        return;
+    }
+    for (path, pid) in candidates {
+        if owner_gone(pid) && fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
+            if let Err(error) = fs::remove_dir_all(&path) {
+                log::warn!(
+                    "Could not remove abandoned plugin profile {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn schedule_profile_cleanup() {
+    PROFILE_CLEANUP.call_once(|| {
+        let root = profile_root();
+        std::thread::spawn(move || {
+            let candidates = abandoned_profiles(&root);
+            // Parent death can precede WebView descendants releasing their files.
+            std::thread::sleep(Duration::from_secs(30));
+            remove_abandoned_profiles(&root, candidates);
+        });
+    });
+}
+
+async fn remove_profile(profile: tempfile::TempDir) {
+    let path = profile.keep();
+    for attempt in 0..=20 {
+        let target = path.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || fs::remove_dir_all(target)).await;
+        match result {
+            Err(error) => {
+                log::warn!("Could not run plugin profile cleanup: {error}");
+                return;
+            }
+            Ok(Ok(())) => return,
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Ok(Err(error)) if attempt == 20 => {
+                log::warn!(
+                    "Could not remove plugin runtime profile {}: {error}",
+                    path.display()
+                );
+                return;
+            }
+            Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    }
+}
 
 fn sessions() -> Result<std::sync::MutexGuard<'static, HashMap<String, Session>>> {
     SESSIONS
@@ -102,12 +218,37 @@ pub(super) fn stop_plugin(id: &str) {
     }
 }
 
-pub(crate) fn stop_all() {
+pub(crate) fn stop_all() -> Vec<Arc<Mutex<RuntimeStatus>>> {
+    let mut statuses = Vec::new();
     if let Ok(mut sessions) = SESSIONS.lock() {
         for (_, session) in sessions.drain() {
             let _ = session.stop.send(true);
+            statuses.push(session.status);
         }
     }
+    statuses
+}
+
+async fn wait_for_cleanup(statuses: &[Arc<Mutex<RuntimeStatus>>]) {
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        if statuses.iter().all(|status| {
+            status.lock().map_or(true, |status| {
+                !matches!(status.state, "starting" | "running")
+            })
+        }) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            log::warn!("Timed out waiting for plugin runtime cleanup");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+pub(crate) async fn stop_all_and_wait() {
+    wait_for_cleanup(&stop_all()).await;
 }
 
 fn update(status: &Mutex<RuntimeStatus>, state: &'static str) {
@@ -248,6 +389,7 @@ async fn start(
     page: String,
     appearance: Appearance,
 ) -> Result<RuntimeStatus> {
+    schedule_profile_cleanup();
     appearance.validate()?;
     let plugin_id = id.clone();
     let (boot, revision) = with_registry_async(move |root| {
@@ -363,18 +505,42 @@ async fn supervise(
         update(&status, "closed");
         return Ok(());
     }
-    let profile = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let root = profile_root();
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    if !fs::symlink_metadata(&root)
+        .map_err(|e| e.to_string())?
+        .file_type()
+        .is_dir()
+    {
+        return Err("Invalid plugin profile directory".into());
+    }
+    let profile = tempfile::Builder::new()
+        .prefix(&format!("plugin-{}-", std::process::id()))
+        .tempdir_in(root)
+        .map_err(|e| e.to_string())?;
     let mut child = command(profile.path())?
         .spawn()
         .map_err(|e| e.to_string())?;
-    let tree = ProcessTree::attach(&child)?;
+    let tree = match ProcessTree::attach(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            remove_profile(profile).await;
+            return Err(error);
+        }
+    };
     if let Ok(mut state) = status.lock() {
         state.pid = child.id();
     }
-    let mut input = child.stdin.take().ok_or("Missing child input")?;
-    let mut output = child.stdout.take().ok_or("Missing child output")?;
+    let (Some(mut input), Some(mut output)) = (child.stdin.take(), child.stdout.take()) else {
+        terminate(&mut child, &tree).await;
+        remove_profile(profile).await;
+        return Err("Missing child pipe".into());
+    };
     if let Err(error) = write_frame(&mut input, &boot, MAX_BOOT).await {
         terminate(&mut child, &tree).await;
+        remove_profile(profile).await;
         return Err(error);
     }
     let (sender, mut messages) = mpsc::channel(4);
@@ -451,6 +617,7 @@ async fn supervise(
     };
     reader.abort();
     terminate(&mut child, &tree).await;
+    remove_profile(profile).await;
     update(&status, outcome?);
     Ok(())
 }
