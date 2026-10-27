@@ -83,18 +83,6 @@ function Click-Element([string]$Name, [string]$Type = 'Button') {
     [GuiNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
-function Find-Toggle([string]$Name) {
-    $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
-    $condition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
-    foreach ($element in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)) {
-        $state = $element.Current
-        if ($state.IsOffscreen -or $state.BoundingRectangle.IsEmpty) { continue }
-        if ($state.ControlType.ProgrammaticName -in @('ControlType.Button', 'ControlType.CheckBox')) { return $element }
-    }
-    return $null
-}
-
 function Screenshot([string]$Name) {
     $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $image = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -187,42 +175,42 @@ try {
     [void](Wait-Until { -not (Test-Path $profiles) -or @(Get-ChildItem -Force $profiles).Count -eq 0 } 'plugin profile removal')
     $evidence.steps += 'restored_and_stopped_plugin_profile_removed'
 
-    # Reopen the plugin, then change the app's close behavior through its own settings.
-    Click-Element 'Reopen plugin'
-    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Find-Element 'Plugin is open in a separate window') } 'reopened plugin' 60)
-    $child = Wait-Until { Plugin-Process } 'reopened plugin host process'
+    # The tray scenario is complete. Clear its isolated process before starting a
+    # separate instance configured to exit when its main window is closed.
+    Stop-Process -Id $main.Id -Force
+    [void](Wait-Until { $main.Refresh(); $main.HasExited } 'tray scenario process cleanup')
+    $pluginPid = $null
+    $exitHome = Join-Path $TestHome 'normal-exit-home'
+    & python scripts/plugin-gui-fixture.py $exitHome
+    if ($LASTEXITCODE -ne 0) { throw 'Normal-exit fixture setup failed' }
+    $settingsPath = Join-Path $exitHome '.cc-switch/settings.json'
+    $settings = Get-Content -Raw $settingsPath | ConvertFrom-Json
+    $settings.minimizeToTrayOnClose = $false
+    [System.IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 8), [System.Text.UTF8Encoding]::new($false))
+    $env:CC_SWITCH_TEST_HOME = $exitHome
+    $main = Start-Process -FilePath $Binary -PassThru
+    $window = Wait-Until {
+        $main.Refresh()
+        if ($main.HasExited) { throw "Normal-exit application failed to start: $($main.ExitCode)" }
+        $handle = [GuiNative]::MainWindow($main.Id)
+        if ($handle -ne [IntPtr]::Zero) { $handle }
+    } 'normal-exit main application window' 90
+    $evidence.exitMainPid = $main.Id
+    Click-Element 'Plugins'
+    [void](Wait-Until { Find-Element 'GUI Acceptance' } 'normal-exit fixture')
+    Click-Element 'Open'
+    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Find-Element 'Plugin is open in a separate window') } 'normal-exit plugin running' 60)
+    $child = Wait-Until { Plugin-Process } 'normal-exit plugin host process'
     $pluginPid = $child.ProcessId
     [void](Wait-Until {
         $p = Get-Process -Id $pluginPid -ErrorAction SilentlyContinue
         if ($p) { $p.Refresh(); if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [GuiNative]::IsWindowVisible($p.MainWindowHandle)) { $true } }
-    } 'reopened plugin native window')
+    } 'normal-exit plugin native window')
     $evidence.exitPluginPid = $pluginPid
     Assert-PluginAlive
-    # The runner's taskbar can cover the sidebar footer on an unmaximized window.
-    Click-Element 'Maximize window'
-    Click-Element 'Settings'
-    Click-Element 'General'
-    $setting = $null
-    for ($i = 0; $i -lt 15 -and -not $setting; $i++) {
-        $setting = Find-Toggle 'Minimize to tray on close'
-        if (-not $setting) {
-            $rect = New-Object GuiNative+Rect
-            [void][GuiNative]::GetWindowRect($window, [ref]$rect)
-            [void][GuiNative]::SetCursorPos([int](($rect.Left + $rect.Right) / 2), [int](($rect.Top + $rect.Bottom) / 2))
-            [GuiNative]::mouse_event(0x0800, 0, 0, [uint32]4294967176, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 300
-        }
-    }
-    if (-not $setting) { throw 'Could not find close behavior setting' }
-    $rect = $setting.Current.BoundingRectangle
-    [void][GuiNative]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))
-    [GuiNative]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-    [GuiNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-    $settingsPath = Join-Path $TestHome '.cc-switch/settings.json'
-    [void](Wait-Until {
-        try { (Get-Content -Raw $settingsPath | ConvertFrom-Json).minimizeToTrayOnClose -eq $false } catch { $false }
-    } 'close-to-exit setting saved')
-    Assert-PluginAlive
+    $profiles = Join-Path $exitHome '.cc-switch/ui-plugin-profiles'
+    [void](Wait-Until { (Test-Path $profiles) -and @(Get-ChildItem -Force $profiles).Count -gt 0 } 'live plugin profile')
+    $evidence.profilesBeforeExit = @(Get-ChildItem -Force $profiles | ForEach-Object { $_.Name })
     Screenshot 'windows-before-normal-exit'
     $pluginTree = @(Plugin-Tree $pluginPid)
     if (-not ($pluginTree | Where-Object { $_.pid -eq $pluginPid })) { throw 'Missing plugin process before exit' }
@@ -250,8 +238,8 @@ try {
 } catch {
     $evidence.error = $_.Exception.ToString()
     try {
-        Copy-Item (Join-Path $TestHome '.cc-switch/ui-plugins/plugin-test.gui-acceptance.json') (Join-Path $reportDir 'windows-plugin-record.json')
-        $logs = Join-Path $TestHome '.cc-switch/logs'
+        Copy-Item (Join-Path $env:CC_SWITCH_TEST_HOME '.cc-switch/ui-plugins/plugin-test.gui-acceptance.json') (Join-Path $reportDir 'windows-plugin-record.json')
+        $logs = Join-Path $env:CC_SWITCH_TEST_HOME '.cc-switch/logs'
         if (Test-Path $logs) { Copy-Item $logs (Join-Path $reportDir 'windows-app-logs') -Recurse }
     } catch { $evidence.diagnosticError = $_.Exception.ToString() }
     try { Screenshot 'windows-failure' } catch { }

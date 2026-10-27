@@ -112,6 +112,7 @@ jobs:
             if (-not $ready) { throw 'Vite did not start' }
             & powershell -NoProfile -File scripts/plugin-gui-windows.ps1 -Binary (Join-Path $env:GITHUB_WORKSPACE 'acceptance-bin/cc-switch.exe') -TestHome $homeDir -Report (Join-Path $evidence 'report.json')
             if ($LASTEXITCODE -ne 0) { throw 'Windows main-window acceptance failed' }
+
           } finally {
             & taskkill /PID $vite.Id /T /F 2>$null
           }
@@ -124,7 +125,7 @@ jobs:
           print(json.dumps(report, indent=2))
           assert report['success'] and len(report['steps']) >= 4, report
           if report['platform'] == 'linux':
-              report = json.load(open('plugin-gui-evidence/normal-exit/report.json', encoding='utf-8'))
+              report = json.load(open('plugin-gui-evidence/normal-exit/report.json', encoding='utf-8-sig'))
           assert report['success'], report
           assert 'normal_exit_processes_and_profile_clean' in [s if isinstance(s, str) else s.get('step') for s in report['steps']], report
           PY
