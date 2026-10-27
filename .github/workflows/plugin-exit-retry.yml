@@ -1,8 +1,8 @@
-name: Plugin Main Window Acceptance Retry
+name: Plugin Normal Exit Acceptance
 
 on:
   push:
-    branches: ['codex/plugin-gui-retry-*']
+    branches: ['codex/plugin-exit-acceptance-*']
   workflow_dispatch:
     inputs:
       source_run_id:
@@ -53,7 +53,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job" --jq '.steps[] | select(.name == "Build native acceptance binary" and .conclusion == "success") | .name' | grep -qx 'Build native acceptance binary'
           gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job" --jq '.steps[] | select((.name == "Save Linux acceptance binary" or .name == "Save Windows acceptance binary") and .conclusion == "success") | .name' | grep -qx "Save $([[ "$OS_NAME" == ubuntu-* ]] && echo Linux || echo Windows) acceptance binary"
           git fetch --no-tags origin "$source_sha"
-          inputs=(src-tauri sdk src assets .github/workflows/plugin-compat.yml rust-toolchain.toml .node-version package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.json tsconfig.node.json postcss.config.cjs tailwind.config.cjs)
+          inputs=(src-tauri sdk src assets rust-toolchain.toml .node-version package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.json tsconfig.node.json postcss.config.cjs tailwind.config.cjs)
           diff -u <(git ls-tree -r "$source_sha" -- "${inputs[@]}") <(git ls-tree -r HEAD -- "${inputs[@]}")
           echo "Verified source run $SOURCE_RUN commit $source_sha, $OS_NAME $RUNNER_ARCHITECTURE"
       - uses: actions/download-artifact@v4
@@ -81,16 +81,19 @@ jobs:
           GDK_BACKEND: x11
         run: |
           set -euo pipefail
-          home="$RUNNER_TEMP/plugin-gui-home"
+          test_home="$RUNNER_TEMP/plugin-gui-home"
           evidence="$GITHUB_WORKSPACE/plugin-gui-evidence"
           mkdir -p "$evidence"
-          python3 scripts/plugin-gui-fixture.py "$home"
+          python3 scripts/plugin-gui-fixture.py "$test_home"
           pnpm exec vite --host 127.0.0.1 --port 3000 --strictPort > "$evidence/vite.log" 2>&1 &
           vite_pid=$!
           trap 'kill "$vite_pid" 2>/dev/null || true' EXIT
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:3000/ >/dev/null && break; sleep 1; done
           curl -fsS http://127.0.0.1:3000/ >/dev/null
-          timeout 180s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' /usr/bin/python3 scripts/plugin-main-window-linux.py "$GITHUB_WORKSPACE/acceptance-bin/cc-switch" "$home" "$evidence"
+          timeout 180s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' /usr/bin/python3 scripts/plugin-main-window-linux.py "$GITHUB_WORKSPACE/acceptance-bin/cc-switch" "$test_home" "$evidence"
+          exit_home="$RUNNER_TEMP/plugin-gui-exit-home"
+          python3 scripts/plugin-gui-fixture.py "$exit_home"
+          CC_SWITCH_GUI_EXIT_TEST=1 timeout 180s dbus-run-session -- xvfb-run -a -s '-screen 0 1280x800x24' /usr/bin/python3 scripts/plugin-main-window-linux.py "$GITHUB_WORKSPACE/acceptance-bin/cc-switch" "$exit_home" "$evidence/normal-exit"
       - name: Exercise main window on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -120,6 +123,10 @@ jobs:
           report = json.load(open('plugin-gui-evidence/report.json', encoding='utf-8-sig'))
           print(json.dumps(report, indent=2))
           assert report['success'] and len(report['steps']) >= 4, report
+          if report['platform'] == 'linux':
+              report = json.load(open('plugin-gui-evidence/normal-exit/report.json', encoding='utf-8'))
+          assert report['success'], report
+          assert 'normal_exit_processes_and_profile_clean' in [s if isinstance(s, str) else s.get('step') for s in report['steps']], report
           PY
       - uses: actions/upload-artifact@v4
         if: always()

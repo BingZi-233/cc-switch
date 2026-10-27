@@ -83,6 +83,18 @@ function Click-Element([string]$Name, [string]$Type = 'Button') {
     [GuiNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+function Find-Toggle([string]$Name) {
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
+    foreach ($element in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)) {
+        $state = $element.Current
+        if ($state.IsOffscreen -or $state.BoundingRectangle.IsEmpty) { continue }
+        if ($state.ControlType.ProgrammaticName -in @('ControlType.Button', 'ControlType.CheckBox')) { return $element }
+    }
+    return $null
+}
+
 function Screenshot([string]$Name) {
     $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
     $image = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
@@ -108,6 +120,20 @@ function Assert-PluginAlive {
     if ($process.MainWindowHandle -eq [IntPtr]::Zero -or -not [GuiNative]::IsWindowVisible($process.MainWindowHandle)) {
         throw 'Plugin native window is not visible'
     }
+}
+
+function Plugin-Tree([int]$RootPid) {
+    $pending = @($RootPid)
+    $tree = @()
+    while ($pending.Count -gt 0) {
+        $pidValue = $pending[0]
+        $pending = @($pending | Select-Object -Skip 1)
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $pidValue"
+        if (-not $process) { continue }
+        $tree += [pscustomobject]@{ pid = [int]$process.ProcessId; created = $process.CreationDate.ToString('o') }
+        $pending += @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $pidValue" | ForEach-Object { [int]$_.ProcessId })
+    }
+    return $tree
 }
 
 try {
@@ -160,6 +186,63 @@ try {
     $profiles = Join-Path $TestHome '.cc-switch/ui-plugin-profiles'
     [void](Wait-Until { -not (Test-Path $profiles) -or @(Get-ChildItem -Force $profiles).Count -eq 0 } 'plugin profile removal')
     $evidence.steps += 'restored_and_stopped_plugin_profile_removed'
+
+    # Reopen the plugin, then change the app's close behavior through its own settings.
+    Click-Element 'Reopen plugin'
+    [void](Wait-Until { (Find-Element 'Stop plugin' 'Button') -and (Find-Element 'Plugin is open in a separate window') } 'reopened plugin' 60)
+    $child = Wait-Until { Plugin-Process } 'reopened plugin host process'
+    $pluginPid = $child.ProcessId
+    [void](Wait-Until {
+        $p = Get-Process -Id $pluginPid -ErrorAction SilentlyContinue
+        if ($p) { $p.Refresh(); if ($p.MainWindowHandle -ne [IntPtr]::Zero -and [GuiNative]::IsWindowVisible($p.MainWindowHandle)) { $true } }
+    } 'reopened plugin native window')
+    $evidence.exitPluginPid = $pluginPid
+    Assert-PluginAlive
+    Click-Element 'Settings'
+    $setting = $null
+    for ($i = 0; $i -lt 15 -and -not $setting; $i++) {
+        $setting = Find-Toggle 'Minimize to tray on close'
+        if (-not $setting) {
+            $rect = New-Object GuiNative+Rect
+            [void][GuiNative]::GetWindowRect($window, [ref]$rect)
+            [void][GuiNative]::SetCursorPos([int](($rect.Left + $rect.Right) / 2), [int](($rect.Top + $rect.Bottom) / 2))
+            [GuiNative]::mouse_event(0x0800, 0, 0, [uint32]4294967176, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 300
+        }
+    }
+    if (-not $setting) { throw 'Could not find close behavior setting' }
+    $rect = $setting.Current.BoundingRectangle
+    [void][GuiNative]::SetCursorPos([int]($rect.X + $rect.Width / 2), [int]($rect.Y + $rect.Height / 2))
+    [GuiNative]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
+    [GuiNative]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+    $settingsPath = Join-Path $TestHome '.cc-switch/settings.json'
+    [void](Wait-Until {
+        try { (Get-Content -Raw $settingsPath | ConvertFrom-Json).minimizeToTrayOnClose -eq $false } catch { $false }
+    } 'close-to-exit setting saved')
+    Assert-PluginAlive
+    Screenshot 'windows-before-normal-exit'
+    $pluginTree = @(Plugin-Tree $pluginPid)
+    if (-not ($pluginTree | Where-Object { $_.pid -eq $pluginPid })) { throw 'Missing plugin process before exit' }
+    $evidence.exitPluginProcesses = $pluginTree
+    $evidence.steps += 'plugin_running_before_normal_exit'
+    Click-Element 'Close window'
+    [void](Wait-Until { $main.Refresh(); $main.HasExited } 'normal main application exit' 30)
+    $evidence.exitCode = $main.ExitCode
+    if ($main.ExitCode -ne 0) { throw "Main application exited with code $($main.ExitCode)" }
+    [void](Wait-Until { -not (Get-Process -Id $pluginPid -ErrorAction SilentlyContinue) } 'plugin exit after main application exit' 15)
+    [void](Wait-Until {
+        $remaining = @($pluginTree | Where-Object {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.pid)"
+            $process -and $process.CreationDate.ToString('o') -eq $_.created
+        })
+        $remaining.Count -eq 0
+    } 'plugin process tree exit after main application exit' 15)
+    [void](Wait-Until { -not (Test-Path $profiles) -or @(Get-ChildItem -Force $profiles).Count -eq 0 } 'profile removal after main application exit' 15)
+    $evidence.mainExited = $main.HasExited
+    $evidence.pluginExited = -not (Get-Process -Id $pluginPid -ErrorAction SilentlyContinue)
+    $evidence.remainingPluginProcesses = @()
+    $evidence.remainingProfileEntries = @(if (Test-Path $profiles) { Get-ChildItem -Force $profiles | ForEach-Object { $_.Name } })
+    $evidence.steps += 'normal_exit_processes_and_profile_clean'
     $evidence.success = $true
 } catch {
     $evidence.error = $_.Exception.ToString()
@@ -184,7 +267,7 @@ try {
 } finally {
     $evidence | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 $Report
     # The runner is isolated. Do not leave a failed test's native processes behind.
-    if ($pluginPid) { Stop-Process -Id $pluginPid -Force -ErrorAction SilentlyContinue }
-    if ($main) { Stop-Process -Id $main.Id -Force -ErrorAction SilentlyContinue }
+    if (-not $evidence.success -and $pluginPid) { Stop-Process -Id $pluginPid -Force -ErrorAction SilentlyContinue }
+    if (-not $evidence.success -and $main) { Stop-Process -Id $main.Id -Force -ErrorAction SilentlyContinue }
 }
 if (-not $evidence.success) { throw $evidence.error }

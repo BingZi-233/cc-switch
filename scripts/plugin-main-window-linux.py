@@ -19,6 +19,7 @@ report = {"platform": "linux", "success": False, "steps": []}
 app = None
 wm = None
 plugin_pid = None
+exit_test = os.environ.get("CC_SWITCH_GUI_EXIT_TEST") == "1"
 
 
 def run(*args):
@@ -101,6 +102,35 @@ def children(pid):
     return result
 
 
+def descendants(pid):
+    parents = {}
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            parents[int(entry.name)] = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    found = set()
+    pending = [pid]
+    while pending:
+        current = pending.pop()
+        for child, parent in parents.items():
+            if parent == current and child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def process_alive(pid):
+    try:
+        # An exited zombie is no longer running, even if its parent has not reaped it.
+        return (pathlib.Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def plugin_alive(pid):
     return children(app.pid) == [pid] and bool(window_for(pid)) and mapped(window_for(pid))
 
@@ -120,6 +150,11 @@ def record(step, main_window):
 
 
 try:
+    if exit_test:
+        settings_path = home / ".cc-switch/settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["minimizeToTrayOnClose"] = False
+        settings_path.write_text(json.dumps(settings))
     env = os.environ.copy()
     env.update({"CC_SWITCH_TEST_HOME": str(home), "GDK_BACKEND": "x11", "NO_AT_BRIDGE": "0",
                 "GTK_A11Y": "always", "WEBKIT_DISABLE_COMPOSITING_MODE": "1"})
@@ -150,10 +185,30 @@ try:
     record("plugin-return", main_window)
 
     # _NET_CLOSE_WINDOW is handled by the window manager as a normal close request.
-    run("wmctrl", "-ic", main_window)
-    wait_for("main window hidden to tray", lambda: not mapped(main_window))
-    time.sleep(3)
-    record("main-hidden-to-tray", main_window)
+    if exit_test:
+        profiles = home / ".cc-switch/ui-plugin-profiles"
+        if not profiles.is_dir() or not any(profiles.iterdir()):
+            raise RuntimeError("Plugin profile was not created before exit")
+        plugin_processes = {plugin_pid} | descendants(plugin_pid)
+        report["exitCheck"] = {"mainPid": app.pid, "pluginPid": plugin_pid,
+                               "pluginProcesses": sorted(plugin_processes),
+                               "profileExistedBeforeExit": True}
+        record("before-normal-exit", main_window)
+        run("wmctrl", "-ic", main_window)
+        wait_for("main process to exit", lambda: app.poll() is not None, 30)
+        if app.returncode != 0:
+            raise RuntimeError(f"Main process exited with {app.returncode}")
+        wait_for("plugin process tree to exit", lambda: not any(map(process_alive, plugin_processes)), 30)
+        wait_for("plugin profiles to be removed", lambda: not profiles.exists() or not any(profiles.iterdir()), 30)
+        report["exitCheck"].update({"exitCode": app.returncode,
+                                    "pluginProcessesExited": True,
+                                    "profilesEmpty": True})
+        report["steps"].append({"step": "normal_exit_processes_and_profile_clean"})
+    else:
+        run("wmctrl", "-ic", main_window)
+        wait_for("main window hidden to tray", lambda: not mapped(main_window))
+        time.sleep(3)
+        record("main-hidden-to-tray", main_window)
     report["success"] = True
 except Exception as error:
     report["error"] = str(error)
@@ -173,7 +228,7 @@ finally:
         except subprocess.TimeoutExpired:
             app.kill()
             app.wait()
-    if plugin_pid:
+    if plugin_pid and not report["success"]:
         try:
             os.killpg(plugin_pid, signal.SIGKILL)
         except ProcessLookupError:

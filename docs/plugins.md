@@ -137,7 +137,7 @@ pnpm exec vitest run tests/components/PluginsPage.test.tsx tests/lib/uiPluginSdk
 cargo test --manifest-path src-tauri/Cargo.toml --lib ui_plugins::
 ```
 
-跨平台原生验收见 [Plugin Native Compatibility 工作流](../.github/workflows/plugin-compat.yml)：在 Windows WebView2 和 Linux WebKitGTK/Xvfb 中启动真实插件窗口，验证 SDK 与只读数据接口、死循环看门狗、崩溃恢复、撤权停用及主进程退出，并检查渲染子进程没有残留。每次运行上传 JSON 报告和子进程诊断日志。
+跨平台原生验收见 [Plugin Native Compatibility 工作流](../.github/workflows/plugin-compat.yml)：在 Windows WebView2 和 Linux WebKitGTK/Xvfb 中启动真实插件窗口，验证 SDK 与只读数据接口、死循环看门狗、崩溃恢复、撤权停用及主进程退出，并检查渲染子进程没有残留。另在隔离的主应用中实际切换页面、返回插件页和关闭到托盘，检查插件窗口与进程持续运行。每次运行上传 JSON 报告、截图和诊断日志。
 
 验收入口只在显式启用 `test-hooks` 时编译，不进入正常发行构建。它使用临时配置和数据库，不读取用户的供应商数据。Windows 验收构建使用与发行版相同的无控制台子系统，覆盖私有管道与 Job Object 的实际行为。Linux 可在安装原生 WebView 与 Xvfb 依赖后运行：
 
