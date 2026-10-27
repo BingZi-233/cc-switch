@@ -19,6 +19,7 @@ public static class GuiNative {
 '@
 [void][GuiNative]::SetProcessDPIAware()
 $env:CC_SWITCH_TEST_HOME = $TestHome
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--force-renderer-accessibility'
 $evidence = [ordered]@{ platform = 'windows'; success = $false; steps = @() }
 $main = $null
 $pluginPid = $null
@@ -151,10 +152,16 @@ try {
     try { Screenshot 'windows-failure' } catch { }
     try {
         $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
-        $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |
-            ForEach-Object { "$($_.Current.ControlType.ProgrammaticName)`t$($_.Current.Name)`t$($_.Current.IsOffscreen)`t$($_.Current.BoundingRectangle)" } |
-            Set-Content -Encoding UTF8 (Join-Path $reportDir 'windows-uia-tree.txt')
-    } catch { }
+        $nodes = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+        $lines = @("Window=$window Root=$($root.Current.Name) Count=$($nodes.Count)")
+        for ($i = 0; $i -lt $nodes.Count; $i++) {
+            try {
+                $node = $nodes.Item($i).Current
+                $lines += "$($node.ControlType.ProgrammaticName)`t$($node.Name)`t$($node.IsOffscreen)`t$($node.BoundingRectangle)"
+            } catch { $lines += "Node $i unavailable: $_" }
+        }
+        $lines | Set-Content -Encoding UTF8 (Join-Path $reportDir 'windows-uia-tree.txt')
+    } catch { $_.ToString() | Set-Content -Encoding UTF8 (Join-Path $reportDir 'windows-uia-error.txt') }
 } finally {
     $evidence | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 $Report
     # The runner is isolated. Do not leave a failed test's native processes behind.

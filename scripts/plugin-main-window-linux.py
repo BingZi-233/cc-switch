@@ -141,7 +141,7 @@ try:
 
     run("wmctrl", "-ia", main_window)
     click("Skills")
-    wait_for("Skills page", lambda: visible_element("More Skills actions", "push button"))
+    wait_for("Skills page", lambda: visible_element("More Skills actions", "combo box"))
     record("skills", main_window)
     click("Plugins")
     wait_for("restored plugin controls", lambda: visible_element("Stop plugin", "push button"))

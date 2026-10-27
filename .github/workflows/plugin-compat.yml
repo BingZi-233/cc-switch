@@ -71,6 +71,22 @@ jobs:
       - name: Build native acceptance binary
         id: build
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --features test-hooks
+      - name: Save Linux acceptance binary
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-gui-binary-${{ matrix.os }}
+          path: src-tauri/target/debug/cc-switch
+          compression-level: 0
+          retention-days: 1
+      - name: Save Windows acceptance binary
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-gui-binary-${{ matrix.os }}
+          path: src-tauri/target/debug/cc-switch.exe
+          compression-level: 0
+          retention-days: 1
       - name: Run native WebKitGTK acceptance
         id: native-linux
         if: runner.os == 'Linux'
