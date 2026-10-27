@@ -167,6 +167,10 @@ function App() {
   const [activeApp, setActiveApp] = useState<AppId>(getInitialApp);
   const sharedFeatureApp = sharedFeatureAppOf(activeApp);
   const [currentView, setCurrentView] = useState<View>(readStoredView);
+  const [pluginsVisited, setPluginsVisited] = useState(false);
+  useEffect(() => {
+    if (currentView === "plugins") setPluginsVisited(true);
+  }, [currentView]);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("general");
   const [appConfigScrollTarget, setAppConfigScrollTarget] = useState<AppId>();
@@ -1710,8 +1714,6 @@ function App() {
         );
       case "apps":
         return <AppsPage />;
-      case "plugins":
-        return <PluginsPage />;
       default:
         return null;
     }
@@ -1782,18 +1784,32 @@ function App() {
               }}
             />
           )}
-          <div
-            key={
-              currentView === "settings"
-                ? "settings"
-                : isAppPage(currentView)
-                  ? "app"
-                  : currentView
-            }
-            className="flex min-h-0 flex-1 flex-col"
-          >
-            {renderContent()}
-          </div>
+          {currentView !== "plugins" && (
+            <div
+              key={
+                currentView === "settings"
+                  ? "settings"
+                  : isAppPage(currentView)
+                    ? "app"
+                    : currentView
+              }
+              className="flex min-h-0 flex-1 flex-col"
+            >
+              {renderContent()}
+            </div>
+          )}
+          {(pluginsVisited || currentView === "plugins") && (
+            <div
+              hidden={currentView !== "plugins"}
+              className={
+                currentView === "plugins"
+                  ? "flex min-h-0 flex-1 flex-col"
+                  : undefined
+              }
+            >
+              <PluginsPage />
+            </div>
+          )}
         </main>
       </div>
 

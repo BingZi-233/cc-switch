@@ -55,6 +55,7 @@ export function PluginRuntime({
         setStatus(next);
         if (next.state === "starting" || next.state === "running")
           timer = setTimeout(poll, 1000);
+        else void stop(sessionId);
       } catch (error) {
         if (active && !stopped.current) {
           setError(extractErrorMessage(error));

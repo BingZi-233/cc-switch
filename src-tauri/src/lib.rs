@@ -551,6 +551,7 @@ pub fn run() {
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
+            ui_plugins::runtime::schedule_profile_cleanup();
 
             // 初始化日志（输出到 <app_config_dir>/logs/cc-switch.log）
             {
@@ -1550,11 +1551,7 @@ pub fn run() {
             ui_plugins::install_ui_plugin,
             ui_plugins::set_ui_plugin_enabled,
             ui_plugins::set_ui_plugin_permissions,
-            ui_plugins::read_api::get_ui_plugin_providers,
-            ui_plugins::read_api::get_ui_plugin_usage,
             ui_plugins::uninstall_ui_plugin,
-            ui_plugins::get_ui_plugin_storage,
-            ui_plugins::set_ui_plugin_storage,
             commands::get_providers,
             commands::get_current_provider,
             commands::add_provider,

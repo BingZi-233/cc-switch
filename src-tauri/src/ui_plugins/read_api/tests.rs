@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui_plugins::{self, PluginPermission::*};
+use crate::ui_plugins::{self, authorize, check_revision, PluginPermission::*};
 use serde_json::json;
 
 #[test]

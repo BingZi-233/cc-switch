@@ -1,6 +1,6 @@
 //! Explicit read-only projections. Never serialize Provider, settingsConfig or raw request logs.
-use super::{authorize, check_revision, with_registry, PluginPermission, Result};
-use crate::{app_config::AppType, database::Database, store::AppState};
+use super::Result;
+use crate::{app_config::AppType, database::Database};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize)]
@@ -201,48 +201,6 @@ pub(super) fn usage(db: &Database, query: UsageQuery) -> Result<UsageStats> {
             })
             .collect(),
     })
-}
-
-async fn read_authorized<T: Send + 'static>(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    permission: PluginPermission,
-    query: impl FnOnce(&Database) -> Result<T> + Send + 'static,
-) -> Result<T> {
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let revision = with_registry(|root| authorize(root, &id, permission))?;
-        let result = query(&isolated_reader(&db)?)?;
-        // Revoking, disabling, or reinstalling also discards responses already in flight.
-        with_registry(|root| check_revision(root, &id, permission, &revision))?;
-        Ok(result)
-    })
-    .await
-    .map_err(read_error)?
-}
-
-#[tauri::command]
-pub async fn get_ui_plugin_providers(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    query: ProviderQuery,
-) -> Result<ProviderList> {
-    read_authorized(state, id, PluginPermission::ProvidersRead, move |db| {
-        providers(db, query)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn get_ui_plugin_usage(
-    state: tauri::State<'_, AppState>,
-    id: String,
-    query: UsageQuery,
-) -> Result<UsageStats> {
-    read_authorized(state, id, PluginPermission::UsageRead, move |db| {
-        usage(db, query)
-    })
-    .await
 }
 
 #[cfg(test)]

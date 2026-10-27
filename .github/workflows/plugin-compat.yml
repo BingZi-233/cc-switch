@@ -64,14 +64,14 @@ jobs:
         if: runner.os == 'Linux'
         env:
           GDK_BACKEND: x11
-        run: timeout 120s dbus-run-session -- xvfb-run -a src-tauri/target/debug/cc-switch --plugin-compat-check "$PWD/plugin-compat-report.json"
+        run: timeout 180s dbus-run-session -- xvfb-run -a src-tauri/target/debug/cc-switch --plugin-compat-check "$PWD/plugin-compat-report.json"
       - name: Run native WebView2 acceptance
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $report = Join-Path $env:GITHUB_WORKSPACE 'plugin-compat-report.json'
           $process = Start-Process -FilePath 'src-tauri/target/debug/cc-switch.exe' -ArgumentList @('--plugin-compat-check', ('"' + $report + '"')) -PassThru
-          if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Native plugin acceptance timed out' }
+          if (-not $process.WaitForExit(180000)) { $process.Kill(); throw 'Native plugin acceptance timed out' }
           if ($process.ExitCode -ne 0) { throw "Native plugin acceptance exited with $($process.ExitCode)" }
       - name: Verify native evidence
         shell: bash
@@ -80,9 +80,18 @@ jobs:
           import json
           report = json.load(open('plugin-compat-report.json', encoding='utf-8'))
           print(json.dumps(report, indent=2))
-          assert report['success'] and len(report['passed']) == 5, report
+          assert report['success'] and set(report['passed']) == {
+              'native_webview_sdk_storage_providers_usage',
+              'upgrade_preserves_data_grants_and_reopens_new_page',
+              'infinite_loop_watchdog_host_remains_responsive',
+              'restart_preserves_storage_and_child_crash_is_contained',
+              'permission_denial_and_disable_terminate_runtime',
+              'parent_crash_terminates_child',
+          }, report
           assert report['launchDirectoryClean'] and report['launchDirectoryEntries'] == [], report
           assert report['childEnvironmentValidated'], report
+          assert report['runtimeProfilesCleanBeforeParentCrash'], report
+          assert report['parentCrashProfileRecoveryClean'], report
           PY
       - name: Upload native evidence
         if: always()
